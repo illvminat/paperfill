@@ -1,5 +1,7 @@
 """The one trivial check the skeleton must pass: the CLI runs and reports a version."""
 
+import json
+
 from paperfill import __version__
 from paperfill.cli import main
 
@@ -113,8 +115,8 @@ def test_run_report_verify_and_kill_roundtrip(capsys, tmp_path, gamma_market_raw
         {"proxy_wallet": "0x" + "ab" * 20, "side": "BUY", "token_id": t, "condition_id": up,
          "size": "50", "price": p, "timestamp": ts, "transaction_hash": "0x" + "cd" * 32}
         for t, p, ts in (
-            ("53934085284283935757967599773218504668015974619861018376220722435054668663854", "0.60", 1000),
-            ("30179046982707908235121715680890477817522408308548491240468121960115826019803", "0.40", 1000),
+            (json.loads(raw["clobTokenIds"])[0], "0.60", 1000),
+            (json.loads(raw["clobTokenIds"])[1], "0.40", 1000),
         )
     ]  # fmt: skip
     Source = _fake_market_source(raw, rows)
