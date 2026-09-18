@@ -73,3 +73,86 @@ def test_replay_fetches_saves_then_uses_cache(capsys, tmp_path):
     assert main(argv, source_factory=Source) == 0
     assert "cached:" in capsys.readouterr().out
     assert len(calls) == 1  # second run did not touch the network
+
+
+def _fake_market_source(raw, trades_rows=()):
+    from polymarket.models.data.activity import Trade as SdkTrade
+    from polymarket.models.gamma.market import Market as SdkMarket
+
+    class Page:
+        def __init__(self, items, has_more=False):
+            self.items, self.has_more, self.next_cursor = tuple(items), has_more, None
+
+    class Paginator:
+        def __init__(self, items):
+            self._items = items
+
+        def first_page(self):
+            return Page(self._items)
+
+    class Source:
+        def list_markets(self, **params):
+            if params.get("closed") is False and raw.get("closed"):
+                return Paginator(())
+            return Paginator((SdkMarket.model_validate(raw),))
+
+        def list_trades(self, **params):
+            return Paginator(tuple(SdkTrade.model_validate(r) for r in trades_rows))
+
+        def close(self):
+            pass
+
+    return Source
+
+
+def test_run_report_verify_and_kill_roundtrip(capsys, tmp_path, gamma_market_raw):
+    raw = dict(gamma_market_raw)
+    raw["closed"], raw["umaResolutionStatus"], raw["outcomePrices"] = True, "resolved", '["1", "0"]'
+    up = raw["conditionId"]
+    rows = [
+        {"proxy_wallet": "0x" + "ab" * 20, "side": "BUY", "token_id": t, "condition_id": up,
+         "size": "50", "price": p, "timestamp": ts, "transaction_hash": "0x" + "cd" * 32}
+        for t, p, ts in (
+            ("53934085284283935757967599773218504668015974619861018376220722435054668663854", "0.60", 1000),
+            ("30179046982707908235121715680890477817522408308548491240468121960115826019803", "0.40", 1000),
+        )
+    ]  # fmt: skip
+    Source = _fake_market_source(raw, rows)
+    runs, hist = tmp_path / "runs", tmp_path / "hist"
+    argv = ["run", "--condition", up, "--runs-dir", str(runs), "--history-dir", str(hist)]
+    assert main(argv, source_factory=Source) == 0
+    out = capsys.readouterr().out
+    assert "[replay]" in out and "events 2" in out and "settled yes" in out
+    run_dir = next(runs.iterdir())
+    assert (run_dir / "journal.jsonl").exists() and (run_dir / "report.md").exists()
+    assert main(["journal", "verify", str(run_dir / "journal.jsonl")]) == 0
+    assert "chain intact" in capsys.readouterr().out
+    assert main(["report", str(run_dir)]) == 0
+    assert "# paperfill run report" in capsys.readouterr().out
+    assert main(["kill", str(run_dir)]) == 0
+    assert (run_dir / "KILL").exists()
+    # a second run in that directory would halt immediately: verified through the risk engine
+    lines = (run_dir / "journal.jsonl").read_text().splitlines()
+    (run_dir / "journal.jsonl").write_text("\n".join(lines[:1] + lines[2:]) + "\n")
+    assert main(["journal", "verify", str(run_dir / "journal.jsonl")]) == 1
+    assert main(["report", str(run_dir)]) == 1
+
+
+def test_run_unknown_market_exits_1(capsys, tmp_path):
+    class Source:
+        def list_markets(self, **params):
+            class P:
+                items = ()
+
+                def first_page(self):
+                    return self
+
+            return P()
+
+        def close(self):
+            pass
+
+    assert (
+        main(["run", "--condition", "0xnope", "--runs-dir", str(tmp_path)], source_factory=Source)
+        == 1
+    )

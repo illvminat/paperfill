@@ -48,6 +48,38 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--data-dir", type=Path, default=Path("data/record"), help="where recordings live"
     )
+
+    run = sub.add_parser("run", help="paper-trade a strategy over a replayed tape or a recording")
+    run.add_argument("--condition", required=True, help="market condition id (0x...)")
+    run.add_argument(
+        "--recording",
+        type=Path,
+        default=None,
+        help="recorder file to run on; without it the trade history is replayed",
+    )
+    run.add_argument("--history-dir", type=Path, default=Path("data/history"))
+    run.add_argument("--runs-dir", type=Path, default=Path("data/runs"))
+    run.add_argument("--capital", type=Decimal, default=Decimal("100"))
+    run.add_argument("--size", type=Decimal, default=Decimal("5"), help="base quote size, shares")
+    run.add_argument("--max-order", type=Decimal, default=Decimal("50"), help="max order notional")
+    run.add_argument(
+        "--max-position", type=Decimal, default=Decimal("100"), help="max shares/token"
+    )
+    run.add_argument("--max-market", type=Decimal, default=Decimal("100"), help="max cost/market")
+    run.add_argument("--max-exposure", type=Decimal, default=Decimal("200"))
+    run.add_argument("--daily-loss", type=Decimal, default=Decimal("20"))
+    run.add_argument("--total-loss", type=Decimal, default=Decimal("50"))
+
+    report = sub.add_parser("report", help="rebuild the report of a run from its journal")
+    report.add_argument("run_dir", type=Path)
+
+    journal = sub.add_parser("journal", help="journal tools")
+    jsub = journal.add_subparsers(dest="journal_command", required=True)
+    jverify = jsub.add_parser("verify", help="verify the hash chain of a journal file")
+    jverify.add_argument("path", type=Path)
+
+    kill = sub.add_parser("kill", help="raise the kill switch of a run directory")
+    kill.add_argument("run_dir", type=Path)
     return parser
 
 
@@ -168,6 +200,122 @@ def _cmd_record(args: argparse.Namespace, source_factory: Callable[[], Any]) -> 
     return 0
 
 
+def _load_market(source_factory: Callable[[], Any], condition_id: str) -> Any:
+    from paperfill.markets import from_sdk
+
+    client = source_factory()
+    try:
+        for closed in (False, True):
+            page = client.list_markets(
+                condition_ids=[condition_id], closed=closed, page_size=1
+            ).first_page()
+            if page.items:
+                return from_sdk(page.items[0])
+    finally:
+        close = getattr(client, "close", None)
+        if close:
+            close()
+    return None
+
+
+def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.history import fetch_trades, history_path, load_trades, replay, save_trades
+    from paperfill.journal import Journal
+    from paperfill.report import compute, to_json, to_markdown
+    from paperfill.risk import RiskLimits
+    from paperfill.runner import RunConfig, Runner, events_from_recording
+    from paperfill.strategy import TwoSidedQuoter
+
+    market = _load_market(source_factory, args.condition)
+    if market is None:
+        print(f"no market with condition id {args.condition}")
+        return 1
+    if args.recording is not None:
+        mode, events = "record", events_from_recording(args.recording)
+    else:
+        mode = "replay"
+        path = history_path(args.history_dir, args.condition)
+        if path.exists():
+            _, trades = load_trades(path)
+        else:
+            client = source_factory()
+            try:
+                trades = fetch_trades(client, args.condition)
+            finally:
+                close = getattr(client, "close", None)
+                if close:
+                    close()
+            save_trades(path, args.condition, trades, fetched_at=datetime.now(UTC))
+        events = replay(trades)
+    started = datetime.now(UTC)
+    run_dir = args.runs_dir / f"{started.strftime('%Y%m%dT%H%M%SZ')}-{args.condition[:10]}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    limits = RiskLimits(
+        max_order_notional=args.max_order,
+        max_position_shares=args.max_position,
+        max_market_notional=args.max_market,
+        max_total_exposure=args.max_exposure,
+        daily_loss_limit=args.daily_loss,
+        total_loss_limit=args.total_loss,
+    )
+    config = RunConfig(capital=args.capital, limits=limits, kill_file=run_dir / "KILL")
+    journal = Journal.open(run_dir / "journal.jsonl")
+    strategy = TwoSidedQuoter(size=args.size)
+    print(f"run: {market.question} [{mode}] -> {run_dir}")
+    try:
+        result = Runner(market, strategy, journal, config, mode=mode).run(
+            events, payouts=market.payouts
+        )
+    finally:
+        journal.close()
+    metrics = compute(journal.entries)
+    (run_dir / "report.md").write_text(to_markdown(metrics), encoding="utf-8")
+    (run_dir / "report.json").write_text(to_json(metrics), encoding="utf-8")
+    print(
+        f"events {result.events}  fills {len(result.fills)}  "
+        f"realized P&L {result.portfolio.realized_pnl}  fees {result.portfolio.fees_paid}  "
+        f"settled {'yes' if result.settled else 'no'}"
+        + (f"  HALTED: {result.halted}" if result.halted else "")
+    )
+    print(f"report: {run_dir / 'report.md'}")
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from paperfill.journal import read_entries, verify
+    from paperfill.report import compute, to_json, to_markdown
+
+    entries = read_entries(args.run_dir / "journal.jsonl")
+    v = verify(entries)
+    if not v.ok:
+        print(f"journal FAILED verification at seq {v.first_bad_seq}: {v.reason}")
+        return 1
+    metrics = compute(entries)
+    (args.run_dir / "report.md").write_text(to_markdown(metrics), encoding="utf-8")
+    (args.run_dir / "report.json").write_text(to_json(metrics), encoding="utf-8")
+    print(to_markdown(metrics))
+    return 0
+
+
+def _cmd_journal_verify(args: argparse.Namespace) -> int:
+    from paperfill.journal import verify_file
+
+    v = verify_file(args.path)
+    if v.ok:
+        print(f"OK: {v.entries} entries, chain intact")
+        return 0
+    print(f"FAILED at seq {v.first_bad_seq}: {v.reason} ({v.entries} entries read)")
+    return 1
+
+
+def _cmd_kill(args: argparse.Namespace) -> int:
+    path = args.run_dir / "KILL"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"kill requested {datetime.now(UTC).isoformat()}\n")
+    print(f"kill switch raised: {path}")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None, *, source_factory: Callable[[], Any] = _default_source
 ) -> int:
@@ -181,6 +329,14 @@ def main(
         return _cmd_replay(args, source_factory)
     if args.command == "record":
         return _cmd_record(args, source_factory)
+    if args.command == "run":
+        return _cmd_run(args, source_factory)
+    if args.command == "report":
+        return _cmd_report(args)
+    if args.command == "journal":
+        return _cmd_journal_verify(args)
+    if args.command == "kill":
+        return _cmd_kill(args)
     return 2  # pragma: no cover - argparse rejects unknown commands before we get here
 
 

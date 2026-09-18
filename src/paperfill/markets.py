@@ -48,10 +48,25 @@ class MarketInfo:
     fees: FeeSchedule
     rewards_min_size: Decimal | None
     rewards_max_spread: Decimal | None
+    resolved: bool = False
+    yes_payout: Decimal | None = None
+    no_payout: Decimal | None = None
 
     @property
     def tradeable(self) -> bool:
         return self.active and not self.closed and self.accepting_orders
+
+    @property
+    def payouts(self) -> dict[str, Decimal] | None:
+        """Payout per share for each token once the market is resolved, else None.
+
+        Observed 2026-09-19 on a closed 5-minute market: `resolution.uma_resolution_status`
+        is "resolved" and the outcome prices are exactly "0" and "1"
+        (docs/measurements/2026-09-19-api-probe.md).
+        """
+        if not self.resolved or self.yes_payout is None or self.no_payout is None:
+            return None
+        return {self.yes_token: self.yes_payout, self.no_token: self.no_payout}
 
 
 def parse_slug(slug: str) -> tuple[str | None, str | None]:
@@ -77,6 +92,10 @@ def from_sdk(market: SdkMarket) -> MarketInfo:
     d = market.model_dump(mode="json")
     state, outcomes, trading, rewards = d["state"], d["outcomes"], d["trading"], d["rewards"]
     asset, window = parse_slug(d["slug"] or "")
+    resolved = (
+        bool(state["closed"])
+        and (d.get("resolution") or {}).get("uma_resolution_status") == "resolved"
+    )
     return MarketInfo(
         condition_id=d["condition_id"],
         question=d["question"],
@@ -98,6 +117,9 @@ def from_sdk(market: SdkMarket) -> MarketInfo:
         fees=FeeSchedule.from_gamma(trading["fee_schedule"], fees_enabled=trading["fees_enabled"]),
         rewards_min_size=_dec(rewards.get("rewards_min_size")),
         rewards_max_spread=_dec(rewards.get("rewards_max_spread")),
+        resolved=resolved,
+        yes_payout=_dec(outcomes["yes"].get("price")) if resolved else None,
+        no_payout=_dec(outcomes["no"].get("price")) if resolved else None,
     )
 
 
