@@ -31,16 +31,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_discover(args: argparse.Namespace) -> int:
+def _default_source() -> Any:
     from polymarket import PublicClient
 
+    return PublicClient()
+
+
+def _cmd_discover(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.markets import discover
 
-    client = PublicClient()
+    client = source_factory()
     try:
         rows = list(discover(client, asset=args.asset, window=args.window, limit=args.limit))
     finally:
-        client.close()
+        close = getattr(client, "close", None)
+        if close:
+            close()
     now = datetime.now(UTC)
     print(
         f"{'asset':<6} {'win':<4} {'ends (UTC)':<20} {'in':>6} {'min':>4} "
