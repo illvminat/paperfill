@@ -17,6 +17,7 @@ from paperfill.journal import Entry
 
 ZERO = Decimal("0")
 Q = Decimal("0.0001")
+USDC = Decimal("0.000001")  # money is shown at USDC precision so per-token figures add up
 
 
 def _d(v: Any) -> Decimal:
@@ -159,10 +160,10 @@ def compute(entries: list[Entry]) -> Metrics:
         m.per_token[token] = {
             "fills": int(s["fills"]),
             "shares": str(s["shares"]),
-            "cost": str(s["cost"].quantize(Q)),
+            "cost": str(s["cost"].quantize(USDC)),
             "fees": str(s["fees"]),
             "payout": str(payout) if payout is not None else None,
-            "settled_pnl": str((settled_value - s["cost"]).quantize(Q))
+            "settled_pnl": str((settled_value - s["cost"]).quantize(USDC))
             if settled_value is not None
             else None,
         }

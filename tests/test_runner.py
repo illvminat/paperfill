@@ -106,8 +106,8 @@ def test_runner_end_to_end_with_settlement_and_hand_computed_pnl(gamma_market_ra
     metrics = compute(journal.entries)
     assert metrics.fills == 2 and metrics.maker_fills == 2 and metrics.both_sides
     assert metrics.realized_pnl == D("0.06") and metrics.fees == 0
-    assert metrics.per_token[m.yes_token]["settled_pnl"] == "1.2300"  # 3 - 1.77 (no fees, maker)
-    assert metrics.per_token[m.no_token]["settled_pnl"] == "-1.1700"
+    assert metrics.per_token[m.yes_token]["settled_pnl"] == "1.230000"  # 3 - 1.77 (maker, no fee)
+    assert metrics.per_token[m.no_token]["settled_pnl"] == "-1.170000"
     md = to_markdown(metrics)
     assert "Realized P&L after fees | **0.0600**" in md and "Both sides filled | yes" in md
     assert D(json.loads(to_json(metrics))["realized_pnl"]) == D("0.06")

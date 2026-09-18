@@ -51,7 +51,7 @@ def collect(
     window: str,
     data_dir: Path,
     hours: float,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = lambda m: print(m, flush=True),
     sleep: Callable[[float], None] | None = None,
 ) -> int:
     """Record windows until `hours` elapse or `data_dir / "STOP"` appears. Returns count."""
