@@ -13,11 +13,13 @@ outside without talking to the strategy.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from paperfill.execution import Portfolio
 
@@ -122,20 +124,40 @@ class RiskEngine:
         self.mode, self.trip_reason = Mode.HALTED, reason
         return reason
 
-    def check(self, intent: Intent, marks: dict[str, Decimal], open_notional: Decimal) -> Decision:
-        """Judge one intent given current marks and the notional of resting orders."""
+    def check(
+        self,
+        intent: Intent,
+        marks: dict[str, Decimal],
+        open_orders: Iterable[Any] = (),
+    ) -> Decision:
+        """Judge one intent; resting orders count as if they were already filled."""
         if self.mode is not Mode.NORMAL:
             return Decision(False, f"mode {self.mode.value}: {self.trip_reason or 'paused'}")
         lim = self.limits
         if intent.notional > lim.max_order_notional:
             return Decision(False, f"order notional {intent.notional} > {lim.max_order_notional}")
+        open_orders = list(open_orders)
+        open_notional = sum((o.price * o.remaining for o in open_orders), ZERO)
+        open_shares = sum(
+            (o.remaining for o in open_orders if o.token_id == intent.token_id and o.side == "BUY"),
+            ZERO,
+        )
+        open_market = sum(
+            (
+                o.price * o.remaining
+                for o in open_orders
+                if o.side == "BUY" and self.token_market.get(o.token_id) == intent.market_id
+            ),
+            ZERO,
+        )
         pos = self.portfolio.positions.get(intent.token_id)
         held = pos.size if pos else ZERO
         if intent.side == "BUY":
-            if held + intent.size > lim.max_position_shares:
+            if held + open_shares + intent.size > lim.max_position_shares:
                 return Decision(
                     False,
-                    f"position {held} + {intent.size} > {lim.max_position_shares} shares",
+                    f"position {held} + resting {open_shares} + {intent.size} "
+                    f"> {lim.max_position_shares} shares",
                 )
             market_cost = sum(
                 (
@@ -145,10 +167,10 @@ class RiskEngine:
                 ),
                 ZERO,
             )
-            if market_cost + intent.notional > lim.max_market_notional:
+            if market_cost + open_market + intent.notional > lim.max_market_notional:
                 return Decision(
                     False,
-                    f"market notional {market_cost} + {intent.notional} "
+                    f"market notional {market_cost} + resting {open_market} + {intent.notional} "
                     f"> {lim.max_market_notional}",
                 )
             exposure = self.portfolio.exposure(marks) + open_notional + intent.notional

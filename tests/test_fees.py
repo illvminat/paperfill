@@ -114,3 +114,12 @@ def test_snake_case_keys_from_sdk_dump_are_accepted():
 def test_price_outside_unit_interval_is_rejected(price):
     with pytest.raises(ValueError):
         schedule("0.07", "0.2").taker_fee(Decimal("1"), Decimal(price))
+
+
+def test_non_unit_exponent_uses_decimal_arithmetic():
+    s = FeeSchedule.from_gamma(
+        {"rate": "0.1", "exponent": 2, "takerOnly": True, "rebateRate": "0"}, fees_enabled=True
+    )
+    # 100 * 0.1 * (0.5 * 0.5) ** 2 = 10 * 0.0625 = 0.625
+    assert s.taker_fee(Decimal("100"), Decimal("0.5")) == Decimal("0.62500")
+    assert s.taker_fee(Decimal("100"), Decimal("1")) == Decimal("0")

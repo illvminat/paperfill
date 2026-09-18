@@ -132,7 +132,7 @@ def test_resting_bid_fills_as_maker_when_print_goes_through_its_price():
     assert order.remaining == D("2") and order.status is OrderStatus.OPEN
 
 
-def test_resting_ask_fills_when_book_crosses_it():
+def test_resting_ask_fills_once_per_crossing_of_the_book():
     ex = executor()
     ex.on_book(book(bids=[("0.55", "10")], asks=[("0.60", "10")]))
     order, _ = ex.submit(UP, "SELL", D("0.59"), D("5"))
@@ -140,6 +140,13 @@ def test_resting_ask_fills_when_book_crosses_it():
     fills = ex.on_book(book(bids=[("0.60", "2")], asks=[("0.61", "10")]))  # bid through 0.59
     assert [(f.price, f.size, f.liquidity) for f in fills] == [(D("0.59"), D("2"), "maker")]
     assert order.remaining == D("3")
+    # the recording keeps showing the crossing level: no second fill from the same crossing
+    assert ex.on_book(book(bids=[("0.60", "2")], asks=[("0.61", "10")])) == []
+    assert ex.on_book(book(bids=[("0.62", "9")], asks=[("0.63", "10")])) == []
+    # un-cross, then cross again -> one more fill
+    assert ex.on_book(book(bids=[("0.58", "9")], asks=[("0.63", "10")])) == []
+    fills = ex.on_book(book(bids=[("0.61", "1")], asks=[("0.63", "10")]))
+    assert [(f.size) for f in fills] == [D("1")] and order.remaining == D("2")
 
 
 def test_gtd_expires_and_cancel_all():
@@ -159,18 +166,21 @@ def test_portfolio_accounting_and_settlement():
     pf = Portfolio(cash=D("100"))
     buy = Fill("o1", UP, "BUY", D("0.60"), D("10"), D("0.168"), D("0"), "taker", T0)
     pf.apply(buy)
+    # cost basis includes the buy fee: 6.00 + 0.168 = 6.168, average 0.6168
     assert pf.cash == D("93.832000") and pf.positions[UP].size == D("10")
-    assert pf.positions[UP].average_price == D("0.6")
+    assert pf.positions[UP].average_price == D("0.6168")
     sell = Fill("o2", UP, "SELL", D("0.70"), D("4"), D("0.0588"), D("0"), "taker", T0)
     pf.apply(sell)
-    # realized: 4 * (0.70 - 0.60) - 0.0588 = 0.3412
-    assert pf.realized_pnl == D("0.3412") and pf.positions[UP].size == D("6")
+    # realized: 4 * 0.70 - 4 * 0.6168 - 0.0588 = 2.80 - 2.4672 - 0.0588 = 0.274
+    assert pf.realized_pnl == D("0.274") and pf.positions[UP].size == D("6")
     assert pf.cash == D("93.832000") + D("2.8") - D("0.0588")
     with pytest.raises(ValueError):
         pf.apply(Fill("o3", UP, "SELL", D("0.70"), D("7"), D("0"), D("0"), "taker", T0))
     received = pf.settle({UP: D("1")})
-    # remaining 6 shares cost 3.60, paid 6.00 -> +2.40 realized
-    assert received == D("6") and pf.realized_pnl == D("0.3412") + D("2.40")
+    # remaining 6 shares carry basis 3.7008, pay 6.00 -> +2.2992 realized
+    assert received == D("6") and pf.realized_pnl == D("0.274") + D("2.2992")
+    # and the whole story reconciles with cash: 100 -> 102.5732 = +2.5732 = total realized
+    assert pf.cash - D("100") == pf.realized_pnl
     assert pf.positions[UP].size == 0 and pf.exposure({UP: D("0.5")}) == 0
     assert pf.equity({}) == pf.cash
     assert pf.fees_paid == D("0.2268")

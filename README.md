@@ -39,6 +39,10 @@ docker build -t paperfill .
 docker run --rm -v "$PWD/data:/app/data" paperfill discover --asset BTC --window 5m
 ```
 
+The image runs as uid 1000; if your host user differs, pass `--user "$(id -u)"` so
+files written into `data/` stay yours. `docker compose up` with `RUN_DIR=<run dir
+name>` serves the dashboard of that run on 127.0.0.1:8765.
+
 ## Commands
 
 | Command | What it does |
@@ -50,6 +54,12 @@ docker run --rm -v "$PWD/data:/app/data" paperfill discover --asset BTC --window
 | `paperfill report <run-dir>` | rebuild the report from the journal (fails if the chain is broken) |
 | `paperfill journal verify <file>` | verify the SHA-256 hash chain of a journal |
 | `paperfill kill <run-dir>` | raise the kill switch: the next event halts the run and cancels everything |
+| `paperfill dashboard <run-dir>` | serve a page with run state, summary, positions, journal tail and a kill button (bound to 127.0.0.1 by default) |
+| `paperfill version` | print the installed version |
+
+`run --recording` still asks the Gamma API for the market's parameters (tick, fees,
+outcome); the tape itself is read locally. A recording that does not reach the
+market's end time is marked to market at its last mark instead of being settled.
 
 Run parameters: `--capital`, `--size`, `--max-order`, `--max-position`, `--max-market`,
 `--max-exposure`, `--daily-loss`, `--total-loss`.
@@ -69,7 +79,10 @@ and `docs/decisions/0002-model-ispolneniya.md`:
   crossing it on a recording. Prints exactly at the order price are not fills,
   because queue position is unknown.
 - Positions are held long-only and settled at the market's resolution payouts
-  (1 or 0 per share) when the market is resolved.
+  (1 or 0 per share) when the market is resolved. Buy fees are part of the cost
+  basis, so "realized P&L after fees" is after all fees on both legs.
+- No latency or queue model: the harness measures a strategy's logic against a tape,
+  not its speed.
 
 Level semantics of the `price_change` stream were verified empirically: 400 of 402
 book snapshots in a live recording matched the book rebuilt from the preceding
@@ -85,7 +98,10 @@ every halt is written to the journal with its reason.
 ## Journal and report
 
 Every order, fill, rejection, risk decision and lifecycle event is a journal entry
-linked by a SHA-256 hash chain; `journal verify` reports the first tampered line. The
+linked by a SHA-256 hash chain; `journal verify` reports the first edited or deleted
+line. The chain is unkeyed: it catches edits, not a full rewrite, and a truncated tail
+is only visible through the missing `run_end` entry. Publish the head hash somewhere
+else if you need more than that. The
 report is computed from the journal only, so it can be regenerated later and never
 says anything that was not recorded: orders, fills, fill rate, both-sides
 participation, fees, rebates, realized P&L after fees, max drawdown, per-token and

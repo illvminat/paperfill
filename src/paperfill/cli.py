@@ -9,11 +9,18 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from paperfill import __version__
+
+
+def _decimal(text: str) -> Decimal:
+    try:
+        return Decimal(text)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError(f"not a decimal number: {text!r}") from error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,16 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--history-dir", type=Path, default=Path("data/history"))
     run.add_argument("--runs-dir", type=Path, default=Path("data/runs"))
-    run.add_argument("--capital", type=Decimal, default=Decimal("100"))
-    run.add_argument("--size", type=Decimal, default=Decimal("5"), help="base quote size, shares")
-    run.add_argument("--max-order", type=Decimal, default=Decimal("50"), help="max order notional")
+    run.add_argument("--capital", type=_decimal, default=Decimal("100"))
+    run.add_argument("--size", type=_decimal, default=Decimal("5"), help="base quote size, shares")
+    run.add_argument("--max-order", type=_decimal, default=Decimal("50"), help="max order notional")
     run.add_argument(
-        "--max-position", type=Decimal, default=Decimal("100"), help="max shares/token"
+        "--max-position", type=_decimal, default=Decimal("100"), help="max shares/token"
     )
-    run.add_argument("--max-market", type=Decimal, default=Decimal("100"), help="max cost/market")
-    run.add_argument("--max-exposure", type=Decimal, default=Decimal("200"))
-    run.add_argument("--daily-loss", type=Decimal, default=Decimal("20"))
-    run.add_argument("--total-loss", type=Decimal, default=Decimal("50"))
+    run.add_argument("--max-market", type=_decimal, default=Decimal("100"), help="max cost/market")
+    run.add_argument("--max-exposure", type=_decimal, default=Decimal("200"))
+    run.add_argument("--daily-loss", type=_decimal, default=Decimal("20"))
+    run.add_argument("--total-loss", type=_decimal, default=Decimal("50"))
 
     report = sub.add_parser("report", help="rebuild the report of a run from its journal")
     report.add_argument("run_dir", type=Path)
@@ -228,15 +235,23 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
     from paperfill.journal import Journal
     from paperfill.report import compute, to_json, to_markdown
     from paperfill.risk import RiskLimits
-    from paperfill.runner import RunConfig, Runner, events_from_recording
+    from paperfill.runner import (
+        RunConfig,
+        Runner,
+        events_from_recording,
+        recording_covers_resolution,
+    )
     from paperfill.strategy import TwoSidedQuoter
 
     market = _load_market(source_factory, args.condition)
     if market is None:
         print(f"no market with condition id {args.condition}")
         return 1
+    payouts = market.payouts
     if args.recording is not None:
         mode, events = "record", events_from_recording(args.recording)
+        if not recording_covers_resolution(args.recording, market.end):
+            payouts = None  # partial tape: mark to market, never settle at the final outcome
     else:
         mode = "replay"
         path = history_path(args.history_dir, args.condition)
@@ -268,9 +283,7 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
     strategy = TwoSidedQuoter(size=args.size)
     print(f"run: {market.question} [{mode}] -> {run_dir}")
     try:
-        result = Runner(market, strategy, journal, config, mode=mode).run(
-            events, payouts=market.payouts
-        )
+        result = Runner(market, strategy, journal, config, mode=mode).run(events, payouts=payouts)
     finally:
         journal.close()
     metrics = compute(journal.entries)

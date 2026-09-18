@@ -50,6 +50,22 @@ class GapEvent:
 Event = TradePrint | BookEvent | PriceChangeEvent | GapEvent
 
 
+def recording_covers_resolution(path: Path, market_end: datetime | None) -> bool:
+    """True when the recording's last event is at or after the market's end time.
+
+    Settling a partial recording at the final 1/0 payout would attribute the whole
+    resolution to a few seconds of tape; such runs are marked to market instead.
+    """
+    if market_end is None:
+        return False
+    last: datetime | None = None
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                last = datetime.fromisoformat(json.loads(line)["recv_ts"])
+    return last is not None and last >= market_end
+
+
 def events_from_recording(path: Path) -> Iterator[Event]:
     """Turn a recorder file into events; `last_trade_price` becomes a TradePrint."""
     seq = 0
@@ -176,6 +192,7 @@ class Runner:
     # -- event handling ---------------------------------------------------------
 
     def _apply_fills(self, fills: Iterable[Fill]) -> None:
+        fills = list(fills)
         for fill in fills:
             self.portfolio.apply(fill)
             self.fills.append(fill)
@@ -191,6 +208,8 @@ class Runner:
                 liquidity=fill.liquidity,
                 cash=self.portfolio.cash,
             )
+        if fills:
+            self._mark(force=True)  # the equity curve must see every fill, not just the clock
 
     def _handle(self, event: Event) -> None:
         self.events += 1
@@ -221,6 +240,7 @@ class Runner:
         reason = self.risk.evaluate(self.marks(), self.now)
         if reason:
             self.halted = reason
+            self._mark(force=True)  # the trough that tripped the breaker is on record
             self.journal.record("risk_halt", reason=reason)
             for o in self.executor.cancel_all("risk halt"):
                 self.journal.record("order_cancelled", order_id=o.id, reason=o.reason)
@@ -246,8 +266,7 @@ class Runner:
 
     def _quote(self, q: Quote, marks: dict[str, Decimal]) -> None:
         intent = Intent(self.market.condition_id, q.token_id, q.side, q.price, q.size)
-        open_notional = sum((o.price * o.remaining for o in self.executor.open_orders()), ZERO)
-        decision = self.risk.check(intent, marks, open_notional)
+        decision = self.risk.check(intent, marks, self.executor.open_orders())
         if not decision.allowed:
             self.journal.record(
                 "risk_block",

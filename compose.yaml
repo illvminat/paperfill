@@ -1,6 +1,11 @@
 # Compose spec: SOURCES.md -> tooling/compose-spec.md.
+# Serves the dashboard of a run directory; runs live in ./data/runs on the host.
 services:
-  paperfill:
+  dashboard:
     build: .
     image: paperfill:local
-    command: ["version"]
+    command: ["dashboard", "/app/data/runs/${RUN_DIR:?set RUN_DIR to a run directory name}", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./data:/app/data

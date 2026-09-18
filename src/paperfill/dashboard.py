@@ -13,10 +13,12 @@ entry is a gap).
 from __future__ import annotations
 
 import html
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from paperfill.journal import read_entries, verify
@@ -38,7 +40,7 @@ pre {{ white-space: pre-wrap; word-break: break-all; font-size: 0.8rem; }}
 </style></head><body>
 <h1>paperfill · {title}</h1>
 <p><span class="state {state_class}">{state}</span> {subtitle}</p>
-<form method="post" action="/kill"><button type="submit" {kill_disabled}>Raise kill switch</button>
+<form method="post" action="/kill"><input type="hidden" name="token" value="{token}"><button type="submit" {kill_disabled}>Raise kill switch</button>
 <span> {kill_note}</span></form>
 <h2>Summary</h2>
 <table>{summary_rows}</table>
@@ -91,9 +93,11 @@ def _state(run_dir: Path) -> tuple[str, str, str, list, str | None]:
     return "running", "ok", f"last entry {last.kind} at {last.ts}", entries, None
 
 
-def create_app(run_dir: Path) -> FastAPI:
+def create_app(run_dir: Path, *, kill_token: str | None = None) -> FastAPI:
+    """`kill_token` guards POST /kill against cross-site form posts; random by default."""
     app = FastAPI(title="paperfill dashboard", docs_url=None, redoc_url=None)
     kill_file = run_dir / "KILL"
+    token = kill_token or secrets.token_urlsafe(16)
 
     @app.get("/", response_class=HTMLResponse)
     def index(tail: int = 50) -> str:
@@ -147,6 +151,7 @@ def create_app(run_dir: Path) -> FastAPI:
         )
         killed = kill_file.exists()
         return PAGE.format(
+            token=token,
             title=html.escape(run_dir.name),
             state=state,
             state_class=css,
@@ -163,7 +168,9 @@ def create_app(run_dir: Path) -> FastAPI:
         )
 
     @app.post("/kill")
-    def kill() -> HTMLResponse:
+    def kill(token_field: Annotated[str, Form(alias="token")] = "") -> HTMLResponse:
+        if not secrets.compare_digest(token_field, token):
+            return HTMLResponse("forbidden: bad or missing token", status_code=403)
         kill_file.parent.mkdir(parents=True, exist_ok=True)
         kill_file.write_text(f"kill requested {datetime.now(UTC).isoformat()}\n")
         return HTMLResponse(

@@ -89,6 +89,7 @@ def fetch_trades(
     page_size: int = DEFAULT_PAGE_SIZE,
     sleep: Callable[[float], None] = time.sleep,
     max_retry_after: float = 120.0,
+    max_pages: int = 10_000,
     on_event: Callable[[RateLimited], None] | None = None,
 ) -> list[TradePrint]:
     """Walk every page of taker trades for `condition_id`, oldest first.
@@ -99,6 +100,7 @@ def fetch_trades(
     paginator = source.list_trades(condition_id=condition_id, page_size=page_size, taker_only=True)
     raw: list[Any] = []
     cursor: str | None = None
+    seen: set[str | None] = {None}
     attempt = 0
     while True:
         try:
@@ -117,12 +119,22 @@ def fetch_trades(
         if not page.has_more:
             break
         cursor = page.next_cursor
+        if cursor in seen:
+            raise RuntimeError(f"cursor {cursor!r} repeated: refusing to loop")
+        seen.add(cursor)
+        if len(seen) > max_pages:
+            raise RuntimeError(f"more than {max_pages} pages for one market: refusing to continue")
         paginator = paginator.from_cursor(cursor)
     return _normalise(raw)
 
 
 def _normalise(raw: Iterable[Any]) -> list[TradePrint]:
-    """Newest-first API order becomes oldest-first, stable, with a dense `seq`."""
+    """Newest-first API order becomes oldest-first, stable, with a dense `seq`.
+
+    Timestamps have one-second resolution, so the order of prints within a second is
+    the API's own order (reversed). Determinism therefore holds for a given API
+    response, not across responses that order intra-second prints differently.
+    """
     rows = list(raw)
     rows.reverse()
     rows.sort(key=lambda t: _as_utc(t.timestamp))  # stable: ties keep API order reversed

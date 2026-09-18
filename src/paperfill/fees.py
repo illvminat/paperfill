@@ -6,8 +6,9 @@ Source of truth: SOURCES.md -> polymarket/fees.md and polymarket/market-details.
     fee = C * rate * (p * (1 - p)) ** exponent
 
 where C is the number of shares and p the share price. Only the taker pays
-(`taker_only`); makers are never charged. Fees are rounded to 5 decimal places and
-the smallest fee charged is 0.00001 USDC. The rounding *mode* at the fifth decimal is
+(`taker_only`); makers are never charged. Fees are rounded to 5 decimal places; the
+smallest non-zero fee is 0.00001 USDC and anything smaller rounds to zero, so tiny
+trades near the extremes pay nothing. The rounding *mode* at the fifth decimal is
 not stated by the documentation; ROUND_HALF_UP is used here and marked as an
 assumption in tests/test_fees.py.
 
@@ -72,7 +73,9 @@ class FeeSchedule:
             raise ValueError(f"shares must be non-negative, got {shares}")
         curve = price * (_ONE - price)
         if self.exponent != _ONE:
-            curve = Decimal(str(float(curve) ** float(self.exponent)))
+            if curve == _ZERO:
+                return _ZERO
+            curve = curve**self.exponent  # Decimal power; inexact for non-integer exponents
         return shares * self.rate * curve
 
     def taker_fee(self, shares: Decimal, price: Decimal) -> Decimal:

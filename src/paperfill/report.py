@@ -39,7 +39,8 @@ class Metrics:
     fills: int = 0
     maker_fills: int = 0
     taker_fills: int = 0
-    fill_rate: Decimal = ZERO  # fills per submitted order
+    fill_rate: Decimal = ZERO  # orders that got at least one fill / orders submitted
+    unrealized_pnl: Decimal = ZERO  # open positions at last mark minus their basis (unsettled runs)
     volume: Decimal = ZERO  # shares
     notional: Decimal = ZERO
     fees: Decimal = ZERO
@@ -69,6 +70,8 @@ def compute(entries: list[Entry]) -> Metrics:
     equity_curve: list[Decimal] = []
     token_stats: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     lean_by_order: dict[str, Decimal] = {}
+    filled_orders: set[str] = set()
+    last_marks: dict[str, Decimal] = {}
     lean_stats: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     payouts: dict[str, Decimal] = {}
     for e in entries:
@@ -96,6 +99,7 @@ def compute(entries: list[Entry]) -> Metrics:
             m.gaps += 1
         elif e.kind == "fill":
             m.fills += 1
+            filled_orders.add(d["order_id"])
             if d["liquidity"] == "maker":
                 m.maker_fills += 1
             else:
@@ -117,6 +121,7 @@ def compute(entries: list[Entry]) -> Metrics:
             ls["token:" + d["token"]] += size
         elif e.kind == "mark":
             equity_curve.append(_d(d["equity"]))
+            last_marks = {k: _d(v) for k, v in (d.get("marks") or {}).items()}
         elif e.kind == "settle":
             payouts = {k: _d(v) for k, v in d["payouts"].items()}
         elif e.kind == "run_end":
@@ -128,7 +133,12 @@ def compute(entries: list[Entry]) -> Metrics:
             m.settled = bool(d.get("settled"))
             m.final_equity = _d(d["cash"])
     if m.orders_submitted:
-        m.fill_rate = (Decimal(m.fills) / Decimal(m.orders_submitted)).quantize(Q)
+        m.fill_rate = (Decimal(len(filled_orders)) / Decimal(m.orders_submitted)).quantize(Q)
+    if not m.settled:
+        m.unrealized_pnl = sum(
+            (s["shares"] * last_marks.get(t, ZERO) - s["cost"] for t, s in token_stats.items()),
+            ZERO,
+        )
     m.net_pnl_with_rebates = m.realized_pnl + m.rebates_estimated
     if equity_curve:
         peak, dd = equity_curve[0], ZERO
@@ -196,12 +206,17 @@ def to_markdown(m: Metrics) -> str:
         f"{m.orders_submitted} / {m.orders_rejected} / {m.orders_cancelled} / {m.orders_expired} |",
         f"| Risk blocks | {m.risk_blocks} |",
         f"| Fills (maker / taker) | {m.fills} ({m.maker_fills} / {m.taker_fills}) |",
-        f"| Fill rate (fills per order) | {pct(m.fill_rate)} |",
+        f"| Orders with at least one fill | {pct(m.fill_rate)} |",
         f"| Both sides filled | {'yes' if m.both_sides else 'no'} |",
         f"| Volume (shares) / notional (USDC) | {m.volume} / {m.notional.quantize(Q)} |",
         f"| Fees paid | {m.fees} |",
         f"| Maker rebates (estimate, upper bound) | {m.rebates_estimated} |",
         f"| Realized P&L after fees | **{m.realized_pnl.quantize(Q)}** |",
+        (
+            f"| Unrealized P&L at last mark (not settled) | {m.unrealized_pnl.quantize(Q)} |"
+            if not m.settled
+            else "| Unrealized P&L | — (settled) |"
+        ),
         f"| P&L incl. rebate estimate | {m.net_pnl_with_rebates.quantize(Q)} |",
         f"| Final equity | {m.final_equity.quantize(Q)} |",
         f"| Max drawdown | {m.max_drawdown.quantize(Q)} ({m.max_drawdown_pct}%) |",
@@ -234,6 +249,9 @@ def to_markdown(m: Metrics) -> str:
         "",
         "Fill model is conservative (see `execution.py`). A P&L here is a property of the",
         "strategy on this tape, not a forecast. Losses are reported exactly like gains.",
+        "Win rates by lean bucket come from a single market's resolution: one observation,",
+        "not a measure of skill. Buy fees are part of the cost basis, so realized P&L is",
+        "after all fees.",
         "",
     ]
     return "\n".join(lines)

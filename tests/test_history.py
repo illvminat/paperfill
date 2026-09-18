@@ -159,3 +159,10 @@ def test_live_full_history_of_a_closed_market():
         client.close()
     assert len(trades) == 5347
     assert trades == list(replay(trades))
+
+
+def test_repeated_cursor_is_refused():
+    pages = _pages()
+    pages["c2"] = _Page(pages["c2"].items, True, "c2")  # server keeps pointing at itself
+    with pytest.raises(RuntimeError, match="repeated"):
+        fetch_trades(_Source(pages), CID, sleep=lambda s: None)

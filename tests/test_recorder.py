@@ -116,8 +116,17 @@ def test_reconnects_after_failure_and_writes_gap():
         run_recorder(subscribe, sink, stop=stop, clock=_Clock(), sleep=_no_sleep, max_events=3)
     )
     kinds = [r["kind"] for r in sink.records]
-    assert kinds == ["start", "gap", "book", "price_change", "last_trade_price", "stop"]
+    assert kinds == [
+        "start",
+        "gap",
+        "reconnect",
+        "book",
+        "price_change",
+        "last_trade_price",
+        "stop",
+    ]
     assert sink.records[1]["reason"] == "ConnectionError: socket closed"
+    assert sink.records[2]["delay"] == 2.0
     assert n == 3 and len(calls) == 2 and sink.records[-1]["events"] == 3
 
 
@@ -129,7 +138,15 @@ def test_stream_that_ends_by_itself_is_a_gap_then_reconnect():
         run_recorder(subscribe, sink, stop=stop, clock=_Clock(), sleep=_no_sleep, max_events=3)
     )
     kinds = [r["kind"] for r in sink.records]
-    assert kinds == ["start", "book", "gap", "price_change", "last_trade_price", "stop"]
+    assert kinds == [
+        "start",
+        "book",
+        "gap",
+        "reconnect",
+        "price_change",
+        "last_trade_price",
+        "stop",
+    ]
     assert sink.records[2]["reason"] == "stream ended"
 
 
@@ -151,3 +168,34 @@ def test_stop_event_ends_loop_without_gap():
 
     asyncio.run(scenario())
     assert [r["kind"] for r in sink.records] == ["start", "book", "stop"]
+
+
+def test_backoff_doubles_up_to_cap_and_connections_are_closed():
+    sink = ListSink()
+    stop = asyncio.Event()
+    subscribe, _ = _subscribe_factory(
+        [
+            ConnectionError("1"),
+            ConnectionError("2"),
+            ConnectionError("3"),
+            ConnectionError("4"),
+            _events()[:1],
+        ]
+    )
+    closed = []
+    asyncio.run(
+        run_recorder(
+            subscribe,
+            sink,
+            stop=stop,
+            clock=_Clock(),
+            sleep=_no_sleep,
+            max_events=1,
+            reconnect_delay=2.0,
+            max_reconnect_delay=10.0,
+            on_connection_closed=closed.append,
+        )
+    )
+    delays = [r["delay"] for r in sink.records if r["kind"] == "reconnect"]
+    assert delays == [2.0, 4.0, 8.0, 10.0]
+    assert len(closed) == 5  # every handle, failed or not, was handed back for closing

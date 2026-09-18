@@ -93,9 +93,12 @@ def test_halted_state_and_broken_chain(tmp_path):
     assert client.get("/api/report.json").status_code == 409
 
 
-def test_kill_button_creates_file_and_disables_itself(tmp_path):
-    client = TestClient(create_app(tmp_path))
+def test_kill_button_needs_the_page_token(tmp_path):
+    client = TestClient(create_app(tmp_path, kill_token="t0k"))
     assert "disabled" not in client.get("/").text.split("Raise kill switch")[0][-120:]
-    r = client.post("/kill", follow_redirects=False)
+    assert client.post("/kill", follow_redirects=False).status_code == 403  # cross-site POST
+    assert client.post("/kill", data={"token": "wrong"}, follow_redirects=False).status_code == 403
+    assert not (tmp_path / "KILL").exists()
+    r = client.post("/kill", data={"token": "t0k"}, follow_redirects=False)
     assert r.status_code == 303 and (tmp_path / "KILL").exists()
     assert "kill switch is raised" in client.get("/").text

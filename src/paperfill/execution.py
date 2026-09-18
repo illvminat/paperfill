@@ -65,6 +65,7 @@ class Order:
     remaining: Decimal = field(default=ZERO)
     status: OrderStatus = OrderStatus.OPEN
     reason: str | None = None
+    crossed: bool = False  # the book currently sits through this order's price
 
     def __post_init__(self) -> None:
         self.remaining = self.size
@@ -265,19 +266,27 @@ class PaperExecutor:
             levels[price] = left
 
     def _match_resting_against_book(self, token_id: str) -> list[Fill]:
+        """Fill resting orders when the opposite side *starts* sitting through their price.
+
+        A recording keeps showing the crossing level (we were never really there), so a
+        fill is taken once per crossing: on the transition from "not crossed" to
+        "crossed". The order is re-armed only after the book un-crosses.
+        """
         book = self.books[token_id]
         fills: list[Fill] = []
         for order in self._open_orders(token_id):
             opposite = book.best_ask if order.side == "BUY" else book.best_bid
-            if opposite is None:
-                continue
-            crossed = (
+            crossed = opposite is not None and (
                 opposite.price < order.price
                 if order.side == "BUY"
                 else opposite.price > order.price
             )
             if not crossed:
+                order.crossed = False
                 continue
+            if order.crossed:
+                continue
+            order.crossed = True
             size = min(order.remaining, opposite.size)
             fills.append(self._fill(order, order.price, size, "maker", book.ts or self.clock()))
         return fills
@@ -313,7 +322,7 @@ class PaperExecutor:
 @dataclass(slots=True)
 class Position:
     size: Decimal = ZERO
-    cost: Decimal = ZERO  # cash paid for the current size (average cost basis)
+    cost: Decimal = ZERO  # cash paid for the current size including buy fees (cost basis)
 
     @property
     def average_price(self) -> Decimal | None:
@@ -335,9 +344,10 @@ class Portfolio:
         self.fees_paid += fill.fee
         self.rebates_estimated += fill.rebate_estimate
         if fill.side == "BUY":
+            # the fee is part of what the shares cost: it stays in the basis until sold/settled
             self.cash -= fill.notional + fill.fee
             pos.size += fill.size
-            pos.cost += fill.notional
+            pos.cost += fill.notional + fill.fee
         else:
             if fill.size > pos.size:
                 raise ValueError(f"cannot sell {fill.size} of {fill.token_id}: holding {pos.size}")

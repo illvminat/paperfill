@@ -74,12 +74,22 @@ async def run_recorder(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[float], Any] = asyncio.sleep,
     reconnect_delay: float = 2.0,
+    max_reconnect_delay: float = 60.0,
     max_events: int | None = None,
+    on_connection_closed: Callable[[Any], Any] | None = None,
 ) -> int:
-    """Consume events until `stop` is set (or `max_events` written); return the count."""
+    """Consume events until `stop` is set (or `max_events` written); return the count.
+
+    Reconnection waits `reconnect_delay`, doubling after each consecutive failure up to
+    `max_reconnect_delay`, and resets after a connection that delivered an event. Every
+    handle returned by `subscribe` is passed to `on_connection_closed` when it ends.
+    """
     written = 0
+    failures = 0
     sink.write({"kind": "start", "recv_ts": clock().isoformat()})
     while not stop.is_set():
+        delivered = False
+        handle = None
         try:
             handle = subscribe()
             if asyncio.iscoroutine(handle):
@@ -88,6 +98,7 @@ async def run_recorder(
                 async for event in stream:
                     sink.write(event_record(event, clock()))
                     written += 1
+                    delivered = True
                     if max_events is not None and written >= max_events:
                         stop.set()
                     if stop.is_set():
@@ -106,8 +117,16 @@ async def run_recorder(
                     "reason": f"{type(error).__name__}: {error}",
                 }
             )
+        finally:
+            if on_connection_closed is not None and handle is not None:
+                result = on_connection_closed(handle)
+                if asyncio.iscoroutine(result):
+                    await result
         if not stop.is_set():
-            await sleep(reconnect_delay)
+            failures = 0 if delivered else failures + 1
+            delay = min(max_reconnect_delay, reconnect_delay * (2 ** max(0, failures - 1)))
+            sink.write({"kind": "reconnect", "recv_ts": clock().isoformat(), "delay": delay})
+            await sleep(delay)
     sink.write({"kind": "stop", "recv_ts": clock().isoformat(), "events": written})
     return written
 
@@ -124,16 +143,25 @@ async def record_market(
     seconds: float | None,
     reconnect_delay: float = 2.0,
 ) -> int:
-    """Record `token_ids` with a fresh AsyncPublicClient per (re)connection."""
+    """Record `token_ids`; a fresh AsyncPublicClient per connection, closed when it ends."""
     from polymarket.streams import MarketSpec
 
     stop = asyncio.Event()
-    clients: list[Any] = []
+    handles: dict[int, Any] = {}
 
-    def subscribe():
+    def subscribe() -> Any:
         client = client_factory()
-        clients.append(client)
-        return client.subscribe(MarketSpec(token_ids=token_ids))
+        handle = client.subscribe(MarketSpec(token_ids=token_ids))
+        handles[id(handle)] = client
+        return handle
+
+    async def closed(handle: Any) -> None:
+        client = handles.pop(id(handle), None)
+        close = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if close:
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
 
     async def timer() -> None:
         if seconds is not None:
@@ -142,25 +170,40 @@ async def record_market(
 
     timer_task = asyncio.create_task(timer())
     recorder = asyncio.create_task(
-        run_recorder(subscribe, sink, stop=stop, reconnect_delay=reconnect_delay)
+        run_recorder(
+            subscribe,
+            sink,
+            stop=stop,
+            reconnect_delay=reconnect_delay,
+            on_connection_closed=closed,
+        )
     )
     try:
         done, _ = await asyncio.wait({timer_task, recorder}, return_when=asyncio.FIRST_COMPLETED)
-        if recorder not in done:
-            # the timer fired: let the recorder notice `stop` at the next event, or cancel
-            try:
-                return await asyncio.wait_for(recorder, timeout=5)
-            except TimeoutError:
-                recorder.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await recorder
-                sink.write({"kind": "stop", "recv_ts": datetime.now(UTC).isoformat(), "events": -1})
-                return -1
-        return recorder.result()
+        if recorder in done:
+            return recorder.result()
+        # the timer fired: the recorder notices `stop` at its next event; if the stream is
+        # silent, cancel it and record what was written so far
+        try:
+            return await asyncio.wait_for(recorder, timeout=5)
+        except TimeoutError:
+            recorder.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await recorder
+            written = sum(1 for r in getattr(sink, "records", []) if "payload" in r)
+            sink.write(
+                {
+                    "kind": "stop",
+                    "recv_ts": datetime.now(UTC).isoformat(),
+                    "events": written,
+                    "reason": "cancelled while the stream was silent",
+                }
+            )
+            return written
     finally:
         timer_task.cancel()
-        for c in clients:
-            close = getattr(c, "close", None) or getattr(c, "aclose", None)
+        for client in list(handles.values()):
+            close = getattr(client, "close", None) or getattr(client, "aclose", None)
             if close:
                 result = close()
                 if asyncio.iscoroutine(result):

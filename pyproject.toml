@@ -30,6 +30,7 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=1",
   "pytest-cov>=6",
+  "python-multipart>=0.0.20",
   "ruff>=0.13",
 ]
 
@@ -67,3 +68,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+fail_under = 85
