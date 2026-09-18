@@ -39,6 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir", type=Path, default=Path("data/history"), help="where history files live"
     )
     replay.add_argument("--refresh", action="store_true", help="re-download even if cached")
+
+    record = sub.add_parser("record", help="record the live order book and trades of a market")
+    record.add_argument("--condition", required=True, help="market condition id (0x...)")
+    record.add_argument(
+        "--seconds", type=float, default=None, help="stop after this many seconds (default: run)"
+    )
+    record.add_argument(
+        "--data-dir", type=Path, default=Path("data/record"), help="where recordings live"
+    )
     return parser
 
 
@@ -120,6 +129,45 @@ def _cmd_replay(args: argparse.Namespace, source_factory: Callable[[], Any]) -> 
     return 0
 
 
+def _cmd_record(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    import asyncio
+
+    from paperfill.markets import from_sdk
+    from paperfill.recorder import JsonlSink, record_market, record_path
+
+    client = source_factory()
+    try:
+        page = client.list_markets(condition_ids=[args.condition], page_size=1).first_page()
+        if not page.items:
+            print(f"no market with condition id {args.condition}")
+            return 1
+        market = from_sdk(page.items[0])
+    finally:
+        close = getattr(client, "close", None)
+        if close:
+            close()
+    started = datetime.now(UTC)
+    path = record_path(args.data_dir, args.condition, started)
+    sink = JsonlSink(path)
+    print(f"recording {market.question} -> {path}")
+
+    def async_client() -> Any:
+        from polymarket import AsyncPublicClient
+
+        return AsyncPublicClient()
+
+    try:
+        n = asyncio.run(
+            record_market(
+                async_client, [market.yes_token, market.no_token], sink, seconds=args.seconds
+            )
+        )
+    finally:
+        sink.close()
+    print(f"{n} events")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None, *, source_factory: Callable[[], Any] = _default_source
 ) -> int:
@@ -131,6 +179,8 @@ def main(
         return _cmd_discover(args, source_factory)
     if args.command == "replay":
         return _cmd_replay(args, source_factory)
+    if args.command == "record":
+        return _cmd_record(args, source_factory)
     return 2  # pragma: no cover - argparse rejects unknown commands before we get here
 
 
