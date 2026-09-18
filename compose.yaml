@@ -1,0 +1,6 @@
+# Compose spec: SOURCES.md -> tooling/compose-spec.md.
+services:
+  paperfill:
+    build: .
+    image: paperfill:local
+    command: ["version"]

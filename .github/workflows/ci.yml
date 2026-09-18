@@ -1,0 +1,42 @@
+# Continuous integration from the first commit.
+# Workflow syntax: SOURCES.md -> tooling/github-actions-workflow-syntax.md.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the SDK minimum, 3.14 is the owner's machine (docs/decisions/0001).
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install from the lock file
+        run: uv sync --locked --all-groups
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: Tests with coverage
+        run: uv run pytest --cov --cov-report=term-missing -m "not live"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t paperfill:ci .
+      - name: Image runs
+        run: docker run --rm paperfill:ci version
