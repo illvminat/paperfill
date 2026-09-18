@@ -179,15 +179,17 @@ def compute(entries: list[Entry]) -> Metrics:
 
 
 def _bucket(lean: Decimal) -> str:
+    """Conviction attached to the quote by the strategy: for the two-sided quoter the drift
+    lean of the Up mid, for the fair-value quoter the edge on the quoted token."""
     if lean >= Decimal("0.25"):
-        return "strong_up"
+        return "strong_positive"
     if lean > ZERO:
-        return "weak_up"
+        return "positive"
     if lean == ZERO:
         return "flat"
     if lean > Decimal("-0.25"):
-        return "weak_down"
-    return "strong_down"
+        return "negative"
+    return "strong_negative"
 
 
 def to_markdown(m: Metrics) -> str:
@@ -233,12 +235,12 @@ def to_markdown(m: Metrics) -> str:
         )
     lines += [
         "",
-        "## Fills by lean bucket",
+        "## Fills by conviction bucket (strategy-defined lean)",
         "",
         "| Bucket | Fills | Shares | Avg price | Win rate |",
         "|---|---|---|---|---|",
     ]
-    for b in ("strong_up", "weak_up", "flat", "weak_down", "strong_down"):
+    for b in ("strong_positive", "positive", "flat", "negative", "strong_negative"):
         s = m.lean_buckets.get(b)
         if s:
             lines.append(
