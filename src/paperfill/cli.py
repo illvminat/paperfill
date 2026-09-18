@@ -9,6 +9,8 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from paperfill import __version__
@@ -28,6 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--asset", help="asset symbol, e.g. BTC or ETH")
     discover.add_argument("--window", help="market window, e.g. 5m or 15m")
     discover.add_argument("--limit", type=int, default=20, help="max markets to print")
+
+    replay = sub.add_parser(
+        "replay", help="fetch the full trade history of a market and replay it as a stream"
+    )
+    replay.add_argument("--condition", required=True, help="market condition id (0x...)")
+    replay.add_argument(
+        "--data-dir", type=Path, default=Path("data/history"), help="where history files live"
+    )
+    replay.add_argument("--refresh", action="store_true", help="re-download even if cached")
     return parser
 
 
@@ -64,6 +75,51 @@ def _cmd_discover(args: argparse.Namespace, source_factory: Callable[[], Any]) -
     return 0
 
 
+def _cmd_replay(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.history import (
+        RateLimited,
+        fetch_trades,
+        history_path,
+        load_trades,
+        replay,
+        save_trades,
+        stream_digest,
+    )
+
+    path = history_path(args.data_dir, args.condition)
+    if path.exists() and not args.refresh:
+        header, trades = load_trades(path)
+        print(f"cached: {path} (fetched {header['fetched_at']})")
+    else:
+        client = source_factory()
+
+        def report(ev: RateLimited) -> None:
+            print(f"rate limited: waiting {ev.retry_after}s (attempt {ev.attempt})")
+
+        try:
+            trades = fetch_trades(client, args.condition, on_event=report)
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+        save_trades(path, args.condition, trades, fetched_at=datetime.now(UTC))
+        print(f"saved: {path}")
+    stream = list(replay(trades))
+    print(f"{len(stream)} trades")
+    if stream:
+        print(f"first: {stream[0].ts.isoformat()}  last: {stream[-1].ts.isoformat()}")
+        by_token: dict[str, tuple[Decimal, Decimal]] = {}
+        for t in stream:
+            notional, size = by_token.get(t.token_id, (Decimal(0), Decimal(0)))
+            by_token[t.token_id] = (notional + t.price * t.size, size + t.size)
+        for token, (notional, size) in by_token.items():
+            label = next((t.outcome for t in stream if t.token_id == token), None) or "?"
+            vwap = (notional / size).quantize(Decimal("0.0001")) if size else Decimal(0)
+            print(f"  {label:<5} size {size}  vwap {vwap}")
+    print(f"digest: {stream_digest(stream)}")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None, *, source_factory: Callable[[], Any] = _default_source
 ) -> int:
@@ -73,6 +129,8 @@ def main(
         return 0
     if args.command == "discover":
         return _cmd_discover(args, source_factory)
+    if args.command == "replay":
+        return _cmd_replay(args, source_factory)
     return 2  # pragma: no cover - argparse rejects unknown commands before we get here
 
 
