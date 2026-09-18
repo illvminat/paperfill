@@ -23,6 +23,7 @@ from paperfill.history import TradePrint
 from paperfill.journal import Journal
 from paperfill.markets import MarketInfo
 from paperfill.risk import Intent, Mode, RiskEngine, RiskLimits
+from paperfill.signals import FairValue
 from paperfill.strategy import Cancel, Context, Quote, Strategy
 
 ZERO = Decimal("0")
@@ -47,7 +48,17 @@ class GapEvent:
     reason: str
 
 
-Event = TradePrint | BookEvent | PriceChangeEvent | GapEvent
+@dataclass(frozen=True, slots=True)
+class PriceEvent:
+    """An external reference price: source is the RTDS topic suffix."""
+
+    ts: datetime
+    source: str  # "binance", "chainlink", "chainlink.twap"
+    symbol: str
+    value: Decimal
+
+
+Event = TradePrint | BookEvent | PriceChangeEvent | GapEvent | PriceEvent
 
 
 def recording_covers_resolution(path: Path, market_end: datetime | None) -> bool:
@@ -94,6 +105,13 @@ def events_from_recording(path: Path) -> Iterator[Event]:
                 seq += 1
             elif kind == "gap":
                 yield GapEvent(ts, r.get("reason", ""))
+            elif kind.startswith("prices.crypto."):
+                yield PriceEvent(
+                    ts=ts,
+                    source=kind.removeprefix("prices.crypto."),
+                    symbol=str(p["symbol"]),
+                    value=Decimal(str(p["value"])),
+                )
 
 
 @dataclass(slots=True)
@@ -137,6 +155,11 @@ class Runner:
             market.no_token: market.condition_id,
         }
         self.last_prices: dict[str, Decimal] = {}
+        self.fair: FairValue | None = (
+            FairValue(market.window_start, market.end)
+            if market.window_start is not None and market.end is not None
+            else None
+        )
         self.fills: list[Fill] = []
         self.events = 0
         self.halted: str | None = None
@@ -226,6 +249,13 @@ class Runner:
             if book is not None:
                 book.apply_price_change(event.change)
                 self._apply_fills(self.executor.on_book(book))
+        elif isinstance(event, PriceEvent):
+            self.now = event.ts
+            if self.fair is not None:
+                if event.source == "binance":
+                    self.fair.on_spot(event.ts, event.value)
+                elif event.source == "chainlink.twap":
+                    self.fair.on_reference(event.ts, event.value)
         elif isinstance(event, GapEvent):
             self.now = event.ts
             self.journal.record("gap", reason=event.reason)
@@ -248,6 +278,7 @@ class Runner:
     def _strategy(self) -> None:
         if self.risk.mode is not Mode.NORMAL:
             return
+        p_up = self.fair.p_up(self.now) if self.fair is not None else None
         ctx = Context(
             market=self.market,
             now=self.now,
@@ -255,6 +286,7 @@ class Runner:
             last_prices=self.last_prices,
             positions={t: p.size for t, p in self.portfolio.positions.items()},
             open_orders=self.executor.open_orders(),
+            fair_up=Decimal(str(round(p_up, 6))) if p_up is not None else None,
         )
         marks = self.marks()
         for action in self.strategy.on_tick(ctx):
@@ -317,6 +349,14 @@ class Runner:
             settled = True
             self.journal.record("settle", payouts=payouts, received=received)
         self._mark(force=True)
+        if self.fair is not None:
+            self.journal.record(
+                "fair_value",
+                start_price=self.fair.start_price,
+                start_source=self.fair.start_source,
+                last_reference=self.fair.reference_price,
+                sigma_per_second=self.fair.sigma,
+            )
         self.journal.record(
             "run_end",
             events=self.events,

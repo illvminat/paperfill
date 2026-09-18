@@ -55,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--data-dir", type=Path, default=Path("data/record"), help="where recordings live"
     )
+    record.add_argument(
+        "--no-prices", action="store_true", help="do not record Binance/Chainlink reference prices"
+    )
 
     run = sub.add_parser("run", help="paper-trade a strategy over a replayed tape or a recording")
     run.add_argument("--condition", required=True, help="market condition id (0x...)")
@@ -68,6 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--runs-dir", type=Path, default=Path("data/runs"))
     run.add_argument("--capital", type=_decimal, default=Decimal("100"))
     run.add_argument("--size", type=_decimal, default=Decimal("5"), help="base quote size, shares")
+    run.add_argument(
+        "--strategy",
+        choices=["two-sided", "fair-value"],
+        default="two-sided",
+        help="two-sided: lean by mid drift; fair-value: lean by an external fair value "
+        "(needs a recording that includes reference prices)",
+    )
+    run.add_argument(
+        "--min-edge",
+        type=_decimal,
+        default=Decimal("0.02"),
+        help="fair-value: minimum edge to quote a lone side",
+    )
     run.add_argument("--max-order", type=_decimal, default=Decimal("50"), help="max order notional")
     run.add_argument(
         "--max-position", type=_decimal, default=Decimal("100"), help="max shares/token"
@@ -203,7 +219,11 @@ def _cmd_record(args: argparse.Namespace, source_factory: Callable[[], Any]) -> 
     try:
         n = asyncio.run(
             record_market(
-                async_client, [market.yes_token, market.no_token], sink, seconds=args.seconds
+                async_client,
+                [market.yes_token, market.no_token],
+                sink,
+                seconds=args.seconds,
+                price_symbols=None if args.no_prices else market.price_symbols,
             )
         )
     finally:
@@ -241,7 +261,7 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
         events_from_recording,
         recording_covers_resolution,
     )
-    from paperfill.strategy import TwoSidedQuoter
+    from paperfill.strategy import FairValueQuoter, TwoSidedQuoter
 
     market = _load_market(source_factory, args.condition)
     if market is None:
@@ -280,7 +300,11 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
     )
     config = RunConfig(capital=args.capital, limits=limits, kill_file=run_dir / "KILL")
     journal = Journal.open(run_dir / "journal.jsonl")
-    strategy = TwoSidedQuoter(size=args.size)
+    strategy: Any = (
+        FairValueQuoter(size=args.size, min_edge=args.min_edge)
+        if args.strategy == "fair-value"
+        else TwoSidedQuoter(size=args.size)
+    )
     print(f"run: {market.question} [{mode}] -> {run_dir}")
     try:
         result = Runner(market, strategy, journal, config, mode=mode).run(events, payouts=payouts)

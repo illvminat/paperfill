@@ -199,3 +199,25 @@ def test_backoff_doubles_up_to_cap_and_connections_are_closed():
     delays = [r["delay"] for r in sink.records if r["kind"] == "reconnect"]
     assert delays == [2.0, 4.0, 8.0, 10.0]
     assert len(closed) == 5  # every handle, failed or not, was handed back for closing
+
+
+def test_rtds_price_event_is_recorded_under_its_topic():
+    from polymarket.streams import CryptoPricesChainlinkTwapEvent
+
+    # Python-tab example shape from polymarket/realtime-data.md (RTDS), plus window_seconds
+    ev = CryptoPricesChainlinkTwapEvent.model_validate(
+        {
+            "topic": "prices.crypto.chainlink.twap",
+            "type": "update",
+            "timestamp": "2026-06-29T17:15:57.257000Z",
+            "payload": {
+                "symbol": "btc/usd",
+                "timestamp": 1782753357213,
+                "value": "67234.5",
+                "window_seconds": 60,
+            },
+        }
+    )
+    rec = event_record(ev, T0)
+    assert rec["kind"] == "prices.crypto.chainlink.twap"
+    assert rec["payload"]["symbol"] == "btc/usd" and rec["payload"]["value"] == "67234.5"

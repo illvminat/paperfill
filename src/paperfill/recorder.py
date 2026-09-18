@@ -59,11 +59,18 @@ _DROP = {"transaction_hash"}
 
 
 def event_record(event: Any, recv_ts: datetime) -> dict[str, Any]:
-    """Serialise one SDK market event: `{kind, recv_ts, payload}` without hashes."""
+    """Serialise one SDK event: `{kind, recv_ts, payload}` without hashes.
+
+    Market events keep their `type` as kind (`book`, `price_change`, ...); RTDS price
+    events use their topic (`prices.crypto.binance`, `prices.crypto.chainlink`,
+    `prices.crypto.chainlink.twap`) so the two families cannot be confused.
+    """
     payload = event.payload.model_dump(mode="json")
     for key in _DROP:
         payload.pop(key, None)
-    return {"kind": event.type, "recv_ts": recv_ts.isoformat(), "payload": payload}
+    topic = getattr(event, "topic", "market")
+    kind = topic if str(topic).startswith("prices.") else event.type
+    return {"kind": kind, "recv_ts": recv_ts.isoformat(), "payload": payload}
 
 
 async def run_recorder(
@@ -142,16 +149,26 @@ async def record_market(
     *,
     seconds: float | None,
     reconnect_delay: float = 2.0,
+    price_symbols: tuple[str, str] | None = None,
 ) -> int:
-    """Record `token_ids`; a fresh AsyncPublicClient per connection, closed when it ends."""
-    from polymarket.streams import MarketSpec
+    """Record `token_ids` (and, with `price_symbols`, the Binance spot, Chainlink spot and
+    Chainlink 60 s TWAP reference prices); a fresh client per connection, closed at end."""
+    from polymarket.streams import CryptoPricesChainlinkTwapSpec, CryptoPricesSpec, MarketSpec
 
     stop = asyncio.Event()
     handles: dict[int, Any] = {}
+    specs: list[Any] = [MarketSpec(token_ids=token_ids)]
+    if price_symbols is not None:
+        binance, chainlink = price_symbols
+        specs += [
+            CryptoPricesSpec(topic="prices.crypto.binance", symbols=[binance]),
+            CryptoPricesSpec(topic="prices.crypto.chainlink", symbols=[chainlink]),
+            CryptoPricesChainlinkTwapSpec(window_seconds=60, symbols=[chainlink]),
+        ]
 
     def subscribe() -> Any:
         client = client_factory()
-        handle = client.subscribe(MarketSpec(token_ids=token_ids))
+        handle = client.subscribe(specs)
         handles[id(handle)] = client
         return handle
 

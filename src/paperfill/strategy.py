@@ -53,6 +53,7 @@ class Context:
     last_prices: dict[str, Decimal]
     positions: dict[str, Decimal]  # shares held per token
     open_orders: list[Order]
+    fair_up: Decimal | None = None  # external fair probability of "Up", if a feed is present
 
     def reference_price(self, token_id: str) -> Decimal | None:
         """Mid if a two-sided book exists, else the last print; None if nothing known."""
@@ -128,4 +129,64 @@ class TwoSidedQuoter:
             if size < ctx.market.min_order_size:
                 continue
             actions.append(Quote(token, "BUY", price, size, self.quote_ttl, lean))
+        return actions
+
+
+@dataclass(slots=True)
+class FairValueQuoter:
+    """Bid both tokens at the best bid, sized by the edge of an external fair value.
+
+    Edge on a token is `fair - reference price`. Both bids are placed only when the
+    pair costs at most one dollar (`bid_up + bid_down <= 1`); otherwise only the side
+    with positive edge above `min_edge` is quoted. Sizes scale with edge up to
+    `max_ratio` times the base size. Without a fair value the strategy does nothing
+    and says so through the runner's journal (no quotes, no guesses).
+    """
+
+    size: Decimal = Decimal("5")
+    min_edge: Decimal = Decimal("0.02")
+    edge_gain: Decimal = Decimal("10")  # size factor = clamp(1 + gain * edge, 0, max_ratio)
+    max_ratio: Decimal = Decimal("3")
+    requote_every: timedelta = timedelta(seconds=5)
+    max_inventory: Decimal = Decimal("50")
+    quote_ttl: timedelta | None = timedelta(seconds=15)
+    name: str = "fair-value-quoter"
+    _last_quote_at: datetime | None = None
+
+    def on_tick(self, ctx: Context) -> list[Action]:
+        if ctx.fair_up is None:
+            return []
+        if self._last_quote_at is not None and ctx.now - self._last_quote_at < self.requote_every:
+            return []
+        self._last_quote_at = ctx.now
+        up, down = ctx.market.yes_token, ctx.market.no_token
+        tick = ctx.market.tick_size
+        fair = {up: ctx.fair_up, down: ONE - ctx.fair_up}
+        actions: list[Action] = [Cancel(o.id, "requote") for o in ctx.open_orders]
+        bids: dict[str, Decimal] = {}
+        edges: dict[str, Decimal] = {}
+        for token in (up, down):
+            ref, bid = ctx.reference_price(token), ctx.best_bid(token)
+            if ref is None:
+                continue
+            price = bid if bid is not None else _round_to_tick(ref - tick, tick)
+            price = _round_to_tick(price, tick)
+            if not ZERO < price < ONE:
+                continue
+            bids[token] = price
+            edges[token] = fair[token] - ref
+        if not bids:
+            return actions
+        pair_ok = len(bids) == 2 and sum(bids.values(), ZERO) <= ONE
+        for token, price in bids.items():
+            edge = edges[token]
+            if not pair_ok and edge < self.min_edge:
+                continue
+            if ctx.positions.get(token, ZERO) >= self.max_inventory:
+                continue
+            factor = max(ZERO, min(self.max_ratio, ONE + self.edge_gain * edge))
+            size = (self.size * factor).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+            if size < ctx.market.min_order_size:
+                continue
+            actions.append(Quote(token, "BUY", price, size, self.quote_ttl, edge))
         return actions

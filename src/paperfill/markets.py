@@ -51,10 +51,19 @@ class MarketInfo:
     resolved: bool = False
     yes_payout: Decimal | None = None
     no_payout: Decimal | None = None
+    window_start: datetime | None = None
 
     @property
     def tradeable(self) -> bool:
         return self.active and not self.closed and self.accepting_orders
+
+    @property
+    def price_symbols(self) -> tuple[str, str] | None:
+        """(Binance symbol, Chainlink symbol) for the asset, per polymarket/realtime-data.md."""
+        if self.asset is None:
+            return None
+        a = self.asset.lower()
+        return f"{a}usdt", f"{a}/usd"
 
     @property
     def payouts(self) -> dict[str, Decimal] | None:
@@ -74,6 +83,18 @@ def parse_slug(slug: str) -> tuple[str | None, str | None]:
     if not m:
         return None, None
     return m["asset"].upper(), m["window"]
+
+
+def window_start_from_slug(slug: str) -> datetime | None:
+    """The trailing number of an Up/Down slug is the window start as epoch seconds.
+
+    Observed 2026-09-19: `btc-updown-5m-1789768200` -> 2026-09-18T21:50:00Z, equal to the
+    market's `eventStartTime`, which the SDK model does not expose.
+    """
+    m = _SLUG.match(slug)
+    if not m:
+        return None
+    return datetime.fromtimestamp(int(m["ts"]), tz=UTC)
 
 
 def _dt(value: str | datetime | None) -> datetime | None:
@@ -120,6 +141,7 @@ def from_sdk(market: SdkMarket) -> MarketInfo:
         resolved=resolved,
         yes_payout=_dec(outcomes["yes"].get("price")) if resolved else None,
         no_payout=_dec(outcomes["no"].get("price")) if resolved else None,
+        window_start=window_start_from_slug(d["slug"] or ""),
     )
 
 

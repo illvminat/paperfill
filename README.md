@@ -48,9 +48,9 @@ name>` serves the dashboard of that run on 127.0.0.1:8765.
 | Command | What it does |
 |---|---|
 | `paperfill discover --asset BTC --window 5m` | open Up/Down markets, soonest first, with tick, minimum size, fee rate and rebate read from the market itself |
-| `paperfill record --condition 0x… --seconds 300` | record the market WebSocket stream (book snapshots, level changes, prints) to an append-only file; gaps are recorded, reconnection is automatic |
+| `paperfill record --condition 0x… --seconds 300` | record the market WebSocket stream (book snapshots, level changes, prints) plus the Binance spot, Chainlink spot and Chainlink 60 s TWAP reference prices for the asset, to an append-only file; gaps are recorded, reconnection backs off automatically (`--no-prices` to skip the price feeds) |
 | `paperfill replay --condition 0x…` | download the full trade history of a market (cursor walk, `Retry-After` honoured), store it without personal fields, print VWAPs and a deterministic digest |
-| `paperfill run --condition 0x… [--recording file]` | paper-trade the sample strategy over the trade history (replay) or over a recording; writes `journal.jsonl`, `report.md`, `report.json` into `data/runs/<id>/` |
+| `paperfill run --condition 0x… [--recording file] [--strategy two-sided\|fair-value]` | paper-trade a sample strategy over the trade history (replay) or over a recording; writes `journal.jsonl`, `report.md`, `report.json` into `data/runs/<id>/` |
 | `paperfill report <run-dir>` | rebuild the report from the journal (fails if the chain is broken) |
 | `paperfill journal verify <file>` | verify the SHA-256 hash chain of a journal |
 | `paperfill kill <run-dir>` | raise the kill switch: the next event halts the run and cancels everything |
@@ -63,6 +63,21 @@ market's end time is marked to market at its last mark instead of being settled.
 
 Run parameters: `--capital`, `--size`, `--max-order`, `--max-position`, `--max-market`,
 `--max-exposure`, `--daily-loss`, `--total-loss`.
+
+## Sample strategies
+
+Both are samples of how a strategy plugs in, not advice, and both only ever post
+resting bids (post-only, GTD).
+
+- `two-sided`: bid both outcome tokens at the best bid, sizes leaned by the recent
+  drift of the Up mid.
+- `fair-value`: bid both tokens when a pair costs at most one dollar, sized by the
+  edge between the book and an external fair value. The fair value follows the
+  market's own resolution rule: "Up" if the Chainlink 60 s TWAP at the end of the
+  window is at or above the price at its start, so `p_up = Φ(ln(P_now/P_start) /
+  (σ√τ))` with `σ` an exponentially weighted volatility of Binance spot returns and
+  `τ` the seconds left (`src/paperfill/signals.py`). It needs a recording that
+  includes the reference prices; without one it does nothing and the journal says so.
 
 ## How fills are simulated
 

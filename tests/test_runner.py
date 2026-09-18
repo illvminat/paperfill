@@ -156,3 +156,36 @@ def test_events_from_recording_maps_all_kinds(tmp_path):
     )
     kinds = [type(e).__name__ for e in events_from_recording(rec)]
     assert kinds == ["BookEvent", "PriceChangeEvent", "TradePrint", "GapEvent"]
+
+
+def test_price_events_feed_fair_value_and_are_journaled(gamma_market_raw):
+    from paperfill.runner import PriceEvent
+    from paperfill.strategy import FairValueQuoter
+
+    m = market(gamma_market_raw)
+    assert m.window_start == datetime(2026, 9, 18, 21, 50, tzinfo=UTC)
+    journal = Journal(clock=clock())
+    runner = Runner(
+        m,
+        FairValueQuoter(size=D("5"), requote_every=timedelta(0)),
+        journal,
+        RunConfig(),
+        mode="record",
+    )
+    t = lambda s: m.window_start + timedelta(seconds=s)  # noqa: E731
+    up = m.yes_token
+    events = [
+        PriceEvent(t(0), "chainlink.twap", "btc/usd", D("80000")),
+        PriceEvent(t(0), "binance", "btcusdt", D("80000")),
+        PriceEvent(t(1), "binance", "btcusdt", D("80080")),
+        TradePrint(t(2), 0, "BUY", D("0.50"), D("10"), up, "Up"),
+        PriceEvent(t(3), "chainlink.twap", "btc/usd", D("80200")),  # reference well above start
+        TradePrint(t(4), 1, "BUY", D("0.50"), D("10"), up, "Up"),
+    ]
+    runner.run(events)
+    kinds = [e.kind for e in journal.entries]
+    assert "fair_value" in kinds and kinds.count("order_submitted") >= 1
+    fv = next(e for e in journal.entries if e.kind == "fair_value")
+    assert fv.data["start_price"] == "80000" and fv.data["start_source"] == "twap-at-start"
+    submitted = [e for e in journal.entries if e.kind == "order_submitted"]
+    assert all(D(e.data["lean"]) > 0 for e in submitted)  # fair value above the 0.50 print
