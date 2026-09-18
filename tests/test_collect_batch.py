@@ -116,6 +116,8 @@ def test_batch_runs_taker_probe_and_summarises(tmp_path, gamma_market_raw):
     assert m.taker_fills == 2 and m.fees == D("0.16646")
     # settlement Up=1: 5 - (3.10 + 0.08246) = 1.81754; Down=0: -(2.00 + 0.084) = -2.084
     assert m.realized_pnl == D("1.81754") - D("2.084")
+    # per-token settled P&L is after fees too, so it adds up to the realized figure
+    assert sum(D(t["settled_pnl"]) for t in m.per_token.values()) == m.realized_pnl
     summary = summarize(results)
     assert summary["settled"] == 1 and summary["total_fees"] == "0.16646"
     md = to_markdown(results, summary, "taker-probe")

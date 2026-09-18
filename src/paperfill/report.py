@@ -110,8 +110,10 @@ def compute(entries: list[Entry]) -> Metrics:
             ts = token_stats[d["token"]]
             ts["fills"] += 1
             ts["shares"] += size if d["side"] == "BUY" else -size
-            ts["cost"] += size * price if d["side"] == "BUY" else -size * price
-            ts["fees"] += _d(d["fee"])
+            # cost basis includes the buy fee, exactly as the portfolio keeps it
+            fee = _d(d["fee"])
+            ts["cost"] += size * price + fee if d["side"] == "BUY" else -(size * price) + fee
+            ts["fees"] += fee
             bucket = _bucket(lean_by_order.get(d["order_id"], ZERO))
             ls = lean_stats[bucket]
             ls["fills"] += 1
@@ -225,7 +227,7 @@ def to_markdown(m: Metrics) -> str:
         "",
         "## Per token",
         "",
-        "| Token | Fills | Shares | Cost | Fees | Payout | Settled P&L |",
+        "| Token | Fills | Shares | Cost incl. fees | Fees | Payout | Settled P&L |",
         "|---|---|---|---|---|---|---|",
     ]
     for t, s in m.per_token.items():
