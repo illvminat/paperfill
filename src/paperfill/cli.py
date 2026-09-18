@@ -74,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--size", type=_decimal, default=Decimal("5"), help="base quote size, shares")
     run.add_argument(
         "--strategy",
-        choices=["two-sided", "fair-value"],
+        choices=["two-sided", "fair-value", "taker-probe"],
         default="two-sided",
         help="two-sided: lean by mid drift; fair-value: lean by an external fair value "
         "(needs a recording that includes reference prices)",
