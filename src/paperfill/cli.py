@@ -6,6 +6,7 @@ Subcommands arrive milestone by milestone (docs/zadanie.md), each with its tests
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -103,6 +104,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     kill = sub.add_parser("kill", help="raise the kill switch of a run directory")
     kill.add_argument("run_dir", type=Path)
+
+    collect = sub.add_parser("collect", help="record consecutive windows for hours (gzip files)")
+    collect.add_argument("--asset", default="BTC")
+    collect.add_argument("--window", default="5m")
+    collect.add_argument("--hours", type=float, default=4.0)
+    collect.add_argument("--data-dir", type=Path, default=Path("data/record"))
+
+    batch = sub.add_parser("batch", help="run a strategy over every recording and summarise")
+    batch.add_argument("--recordings", type=Path, default=Path("data/record"), help="directory")
+    batch.add_argument("--out", type=Path, default=Path("data/batch"))
+    batch.add_argument(
+        "--strategy", choices=["two-sided", "fair-value", "taker-probe"], default="fair-value"
+    )
+    batch.add_argument("--capital", type=_decimal, default=Decimal("100"))
+    batch.add_argument("--size", type=_decimal, default=Decimal("5"))
+    batch.add_argument("--min-edge", type=_decimal, default=Decimal("0.02"))
 
     dash = sub.add_parser("dashboard", help="serve the dashboard of a run directory")
     dash.add_argument("run_dir", type=Path)
@@ -250,6 +267,57 @@ def _load_market(source_factory: Callable[[], Any], condition_id: str) -> Any:
     return None
 
 
+def _make_strategy(name: str, size: Decimal, min_edge: Decimal) -> Callable[[], Any]:
+    from paperfill.strategy import FairValueQuoter, TakerProbe, TwoSidedQuoter
+
+    if name == "fair-value":
+        return lambda: FairValueQuoter(size=size, min_edge=min_edge)
+    if name == "taker-probe":
+        return lambda: TakerProbe(size=size)
+    return lambda: TwoSidedQuoter(size=size)
+
+
+def _cmd_collect(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.collect import collect
+
+    def async_client() -> Any:
+        from polymarket import AsyncPublicClient
+
+        return AsyncPublicClient()
+
+    n = collect(
+        source_factory,
+        async_client,
+        asset=args.asset,
+        window=args.window,
+        data_dir=args.data_dir,
+        hours=args.hours,
+    )
+    return 0 if n else 1
+
+
+def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.batch import run_batch, summarize, to_markdown
+    from paperfill.runner import RunConfig
+
+    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    out = args.out / args.strategy
+    results = run_batch(
+        recs,
+        lambda cid: _load_market(source_factory, cid),
+        _make_strategy(args.strategy, args.size, args.min_edge),
+        config=RunConfig(capital=args.capital),
+        out_dir=out,
+    )
+    summary = summarize(results)
+    md = to_markdown(results, summary, args.strategy)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.md").write_text(md, encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(md)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.history import fetch_trades, history_path, load_trades, replay, save_trades
     from paperfill.journal import Journal
@@ -261,7 +329,6 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
         events_from_recording,
         recording_covers_resolution,
     )
-    from paperfill.strategy import FairValueQuoter, TwoSidedQuoter
 
     market = _load_market(source_factory, args.condition)
     if market is None:
@@ -300,11 +367,7 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
     )
     config = RunConfig(capital=args.capital, limits=limits, kill_file=run_dir / "KILL")
     journal = Journal.open(run_dir / "journal.jsonl")
-    strategy: Any = (
-        FairValueQuoter(size=args.size, min_edge=args.min_edge)
-        if args.strategy == "fair-value"
-        else TwoSidedQuoter(size=args.size)
-    )
+    strategy: Any = _make_strategy(args.strategy, args.size, args.min_edge)()
     print(f"run: {market.question} [{mode}] -> {run_dir}")
     try:
         result = Runner(market, strategy, journal, config, mode=mode).run(events, payouts=payouts)
@@ -379,6 +442,10 @@ def main(
         return _cmd_journal_verify(args)
     if args.command == "kill":
         return _cmd_kill(args)
+    if args.command == "collect":
+        return _cmd_collect(args, source_factory)
+    if args.command == "batch":
+        return _cmd_batch(args, source_factory)
     if args.command == "dashboard":
         from paperfill.dashboard import serve
 

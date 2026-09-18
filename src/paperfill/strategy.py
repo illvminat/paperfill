@@ -40,7 +40,17 @@ class Cancel:
     reason: str
 
 
-Action = Quote | Cancel
+@dataclass(frozen=True, slots=True)
+class Take:
+    """Cross the spread now: buy `size` of `token_id` up to `limit` (FAK)."""
+
+    token_id: str
+    size: Decimal
+    limit: Decimal
+    lean: Decimal
+
+
+Action = Quote | Cancel | Take
 
 
 @dataclass(slots=True)
@@ -189,4 +199,34 @@ class FairValueQuoter:
             if size < ctx.market.min_order_size:
                 continue
             actions.append(Quote(token, "BUY", price, size, self.quote_ttl, edge))
+        return actions
+
+
+@dataclass(slots=True)
+class TakerProbe:
+    """Buys both tokens at the ask every `every`; exists to exercise fees end to end.
+
+    Not a trading idea: it pays the spread and the taker fee on every fill so that a run
+    on a real tape shows the fee engine's effect on P&L, which post-only samples never do.
+    """
+
+    size: Decimal = Decimal("5")
+    every: timedelta = timedelta(seconds=30)
+    max_inventory: Decimal = Decimal("50")
+    name: str = "taker-probe"
+    _last_at: dict[str, datetime] = field(default_factory=dict)
+
+    def on_tick(self, ctx: Context) -> list[Action]:
+        actions: list[Action] = []
+        for token in (ctx.market.yes_token, ctx.market.no_token):
+            last = self._last_at.get(token)
+            if last is not None and ctx.now - last < self.every:
+                continue
+            book = ctx.books.get(token)
+            if book is None or book.best_ask is None:
+                continue
+            if ctx.positions.get(token, ZERO) >= self.max_inventory:
+                continue
+            actions.append(Take(token, self.size, book.best_ask.price, ZERO))
+            self._last_at[token] = ctx.now
         return actions

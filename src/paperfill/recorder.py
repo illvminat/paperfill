@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
@@ -31,13 +32,20 @@ class Sink(Protocol):
     def write(self, record: dict[str, Any]) -> None: ...
 
 
+def open_text(path: Path, mode: str = "rt") -> Any:
+    """Open a recording for reading or appending; `.gz` files go through gzip."""
+    if path.suffix == ".gz":
+        return gzip.open(path, mode, encoding="utf-8")
+    return path.open(mode.replace("t", ""), encoding="utf-8")
+
+
 class JsonlSink:
-    """Append-only JSON lines file; one flush per record so a crash loses at most one."""
+    """Append-only JSON lines file (gzip when the name ends in .gz); flushed per record."""
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._f = path.open("a", encoding="utf-8")
+        self._f = open_text(path, "at")
 
     def write(self, record: dict[str, Any]) -> None:
         self._f.write(json.dumps(record, sort_keys=True) + "\n")

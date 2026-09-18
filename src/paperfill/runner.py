@@ -22,9 +22,10 @@ from paperfill.execution import Fill, MarketParams, OrderType, PaperExecutor, Po
 from paperfill.history import TradePrint
 from paperfill.journal import Journal
 from paperfill.markets import MarketInfo
+from paperfill.recorder import open_text
 from paperfill.risk import Intent, Mode, RiskEngine, RiskLimits
 from paperfill.signals import FairValue
-from paperfill.strategy import Cancel, Context, Quote, Strategy
+from paperfill.strategy import Cancel, Context, Quote, Strategy, Take
 
 ZERO = Decimal("0")
 
@@ -70,7 +71,7 @@ def recording_covers_resolution(path: Path, market_end: datetime | None) -> bool
     if market_end is None:
         return False
     last: datetime | None = None
-    with path.open(encoding="utf-8") as f:
+    with open_text(path) as f:
         for line in f:
             if line.strip():
                 last = datetime.fromisoformat(json.loads(line)["recv_ts"])
@@ -80,7 +81,7 @@ def recording_covers_resolution(path: Path, market_end: datetime | None) -> bool
 def events_from_recording(path: Path) -> Iterator[Event]:
     """Turn a recorder file into events; `last_trade_price` becomes a TradePrint."""
     seq = 0
-    with path.open(encoding="utf-8") as f:
+    with open_text(path) as f:
         for line in f:
             if not line.strip():
                 continue
@@ -294,6 +295,9 @@ class Runner:
                 o = self.executor.cancel(action.order_id, action.reason)
                 self.journal.record("order_cancelled", order_id=o.id, reason=o.reason)
                 continue
+            if isinstance(action, Take):
+                self._take(action, marks)
+                continue
             self._quote(action, marks)
 
     def _quote(self, q: Quote, marks: dict[str, Decimal]) -> None:
@@ -328,6 +332,36 @@ class Runner:
             lean=q.lean,
             status=order.status,
             reason=order.reason,
+        )
+        self._apply_fills(fills)
+
+    def _take(self, t: Take, marks: dict[str, Decimal]) -> None:
+        intent = Intent(self.market.condition_id, t.token_id, "BUY", t.limit, t.size)
+        decision = self.risk.check(intent, marks, self.executor.open_orders())
+        if not decision.allowed:
+            self.journal.record(
+                "risk_block",
+                token=t.token_id,
+                side="BUY",
+                price=t.limit,
+                size=t.size,
+                reason=decision.reason,
+            )
+            return
+        order, fills = self.executor.submit(
+            t.token_id, "BUY", t.limit, t.size, order_type=OrderType.FAK, post_only=False
+        )
+        self.journal.record(
+            "order_submitted" if order.status.value != "rejected" else "order_rejected",
+            order_id=order.id,
+            token=t.token_id,
+            side="BUY",
+            price=t.limit,
+            size=t.size,
+            lean=t.lean,
+            status=order.status,
+            reason=order.reason,
+            taker=True,
         )
         self._apply_fills(fills)
 
