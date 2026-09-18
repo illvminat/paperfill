@@ -55,16 +55,16 @@ class FairValue:
         self.last_ts, self.last_price = ts, price
 
     def on_reference(self, ts: datetime, price: Decimal) -> None:
-        """Feed the resolution reference (Chainlink TWAP). The first value at or after the
-        window start becomes the start price; if the feed began mid-window, the first
-        value seen is used and flagged as such."""
-        if self.start_price is None:
+        """Feed the resolution reference (Chainlink TWAP).
+
+        Values before the window start only update the running reference; the start
+        price is the first value at or after the window start. If the feed began
+        mid-window (more than 2 s late), that first value is used and flagged.
+        """
+        if self.start_price is None and ts >= self.window_start:
             self.start_price = price
-            self.start_source = (
-                "twap-at-start"
-                if ts <= self.window_start or ((ts - self.window_start).total_seconds() <= 2)
-                else "first-seen"
-            )
+            late = (ts - self.window_start).total_seconds() > 2
+            self.start_source = "first-seen" if late else "twap-at-start"
         self.reference_ts, self.reference_price = ts, price
 
     reference_ts: datetime | None = None

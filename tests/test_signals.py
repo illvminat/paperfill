@@ -51,3 +51,12 @@ def test_sigma_is_floored_before_data():
     f.on_spot(START, D("80000"))
     f.on_spot(START + timedelta(seconds=1), D("80080"))  # 0.1% in one second
     assert abs(f.sigma - 0.001) < 1e-6
+
+
+def test_reference_before_window_start_does_not_become_the_start_price():
+    f = FairValue(START, END)
+    f.on_reference(START - timedelta(minutes=2), D("81160"))
+    assert f.start_price is None and f.p_up(START) is None
+    f.on_reference(START + timedelta(seconds=1), D("81115"))
+    assert f.start_price == D("81115") and f.start_source == "twap-at-start"
+    assert f.reference_price == D("81115")
