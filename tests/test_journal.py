@@ -69,3 +69,18 @@ def test_unserialisable_data_is_an_error_not_silence():
     j = Journal(clock=_clock())
     with pytest.raises(TypeError):
         j.record("x", obj=object())
+
+
+def test_reopening_continues_the_chain_and_refuses_a_broken_file(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    j = Journal.open(path, clock=_clock())
+    a = j.record("a")
+    j.close()
+    j2 = Journal.open(path, clock=_clock())
+    b = j2.record("b")
+    j2.close()
+    assert b.prev == a.hash and b.seq == 1 and verify_file(path).ok
+    lines = path.read_text().splitlines()
+    path.write_text(lines[0].replace('"kind":"a"', '"kind":"z"') + "\n" + lines[1] + "\n")
+    with pytest.raises(ValueError, match="chain broken"):
+        Journal.open(path, clock=_clock())

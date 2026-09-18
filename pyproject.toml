@@ -17,7 +17,9 @@ classifiers = [
   "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
+  "fastapi>=0.141.1",
   "polymarket-client==0.10.0",
+  "uvicorn[standard]>=0.53.0",
 ]
 
 [project.scripts]
@@ -45,6 +47,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# inline HTML/CSS template: wrapping CSS rules would not make them more readable
+"src/paperfill/dashboard.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

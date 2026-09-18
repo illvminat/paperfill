@@ -80,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     kill = sub.add_parser("kill", help="raise the kill switch of a run directory")
     kill.add_argument("run_dir", type=Path)
+
+    dash = sub.add_parser("dashboard", help="serve the dashboard of a run directory")
+    dash.add_argument("run_dir", type=Path)
+    dash.add_argument("--host", default="127.0.0.1")
+    dash.add_argument("--port", type=int, default=8765)
     return parser
 
 
@@ -337,6 +342,12 @@ def main(
         return _cmd_journal_verify(args)
     if args.command == "kill":
         return _cmd_kill(args)
+    if args.command == "dashboard":
+        from paperfill.dashboard import serve
+
+        print(f"dashboard: http://{args.host}:{args.port}/  (run dir {args.run_dir})")
+        serve(args.run_dir, args.host, args.port)
+        return 0
     return 2  # pragma: no cover - argparse rejects unknown commands before we get here
 
 

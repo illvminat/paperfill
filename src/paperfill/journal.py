@@ -78,9 +78,18 @@ class Journal:
 
     @classmethod
     def open(cls, path: Path, *, clock: Callable[[], datetime] | None = None) -> Journal:
+        """Open for appending; an existing file is verified and its chain continued."""
         path.parent.mkdir(parents=True, exist_ok=True)
+        existing = read_entries(path) if path.exists() else []
+        if existing:
+            v = verify(existing)
+            if not v.ok:
+                raise ValueError(f"{path}: chain broken at seq {v.first_bad_seq}: {v.reason}")
         stream = path.open("a", encoding="utf-8")
-        return cls(stream, clock=clock or (lambda: datetime.now(UTC)))
+        journal = cls(stream, clock=clock or (lambda: datetime.now(UTC)))
+        journal.entries = existing
+        journal._prev = existing[-1].hash if existing else GENESIS
+        return journal
 
     @property
     def head(self) -> str:
