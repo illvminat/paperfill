@@ -81,6 +81,15 @@ journal); readers refuse newer schemas instead of misreading them. `record --max
 caps the file size. Logs are JSON lines on stderr (`--log-level`); the dashboard
 answers `/healthz`.
 
+## As an MCP server
+
+`paperfill mcp` (extra: `uv sync --extra mcp`) exposes the same paper-only tools to an
+agent over stdio: `discover_markets`, `fetch_history`, `run_paper`, `read_report`,
+`verify_journal`, `list_recordings`, `list_runs`, `run_batch`, `calibrate`,
+`raise_kill_switch`, plus a `paperfill://runs/{name}/report.md` resource. Tools return
+structured content with schemas and carry read-only / destructive annotations. For
+Claude Code: `claude mcp add paperfill -- uv run --directory <repo> paperfill mcp`.
+
 ## Sample strategies
 
 Both are samples of how a strategy plugs in, not advice, and both only ever post

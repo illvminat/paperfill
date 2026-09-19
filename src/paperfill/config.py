@@ -49,10 +49,15 @@ class Settings:
 
     @classmethod
     def load(cls, path: Path | None) -> Settings:
-        s = cls()
         if path is None:
-            return s
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+            return cls()
+        return cls.loads(path.read_text(encoding="utf-8"), source=str(path))
+
+    @classmethod
+    def loads(cls, text: str, *, source: str = "<string>") -> Settings:
+        s = cls()
+        data = tomllib.loads(text)
+        path = source
         for section, keys in data.items():
             if section not in s.values:
                 raise ValueError(f"{path}: unknown section [{section}]")

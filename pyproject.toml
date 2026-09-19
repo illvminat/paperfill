@@ -25,6 +25,11 @@ dependencies = [
 [project.scripts]
 paperfill = "paperfill.cli:main"
 
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.2",
+]
+
 [dependency-groups]
 dev = [
   "pytest>=8",

@@ -157,6 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--out", type=Path, default=Path("data/calibration"))
     cal.add_argument("--offsets", default="30,60,120,180,240", help="seconds after window start")
 
+    mcp = sub.add_parser("mcp", help="serve paperfill as an MCP server over stdio")
+    mcp.add_argument("--data-dir", type=Path, default=Path("data"))
+
     dash = sub.add_parser("dashboard", help="serve the dashboard of a run directory")
     dash.add_argument("run_dir", type=Path)
     dash.add_argument("--host", default="127.0.0.1")
@@ -636,6 +639,17 @@ def main(
         return _cmd_collect(args, source_factory)
     if args.command == "batch":
         return _cmd_batch(args, source_factory)
+    if args.command == "mcp":
+        try:
+            from paperfill.mcp_server import serve as serve_mcp
+        except ImportError:
+            print(
+                "the MCP server needs the extra: uv sync --extra mcp "
+                "(or pip install 'paperfill[mcp]')"
+            )
+            return 1
+        serve_mcp(args.data_dir)
+        return 0
     if args.command == "dashboard":
         from paperfill.dashboard import serve
 
