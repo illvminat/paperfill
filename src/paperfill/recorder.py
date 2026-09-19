@@ -46,10 +46,13 @@ class JsonlSink:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._f = open_text(path, "at")
+        self.bytes_written = 0  # uncompressed bytes: what a disk cap bounds conservatively
 
     def write(self, record: dict[str, Any]) -> None:
-        self._f.write(json.dumps(record, sort_keys=True) + "\n")
+        line = json.dumps(record, sort_keys=True) + "\n"
+        self._f.write(line)
         self._f.flush()
+        self.bytes_written += len(line)
 
     def close(self) -> None:
         self._f.close()
@@ -91,6 +94,7 @@ async def run_recorder(
     reconnect_delay: float = 2.0,
     max_reconnect_delay: float = 60.0,
     max_events: int | None = None,
+    max_bytes: int | None = None,
     on_connection_closed: Callable[[Any], Any] | None = None,
 ) -> int:
     """Consume events until `stop` is set (or `max_events` written); return the count.
@@ -101,7 +105,18 @@ async def run_recorder(
     """
     written = 0
     failures = 0
-    sink.write({"kind": "start", "recv_ts": clock().isoformat()})
+    from paperfill import __version__
+    from paperfill.schema import RECORDING_SCHEMA
+
+    stop_reason: dict[str, str] = {}
+    sink.write(
+        {
+            "kind": "start",
+            "recv_ts": clock().isoformat(),
+            "schema": RECORDING_SCHEMA,
+            "paperfill": __version__,
+        }
+    )
     while not stop.is_set():
         delivered = False
         handle = None
@@ -115,6 +130,9 @@ async def run_recorder(
                     written += 1
                     delivered = True
                     if max_events is not None and written >= max_events:
+                        stop.set()
+                    if max_bytes is not None and getattr(sink, "bytes_written", 0) >= max_bytes:
+                        stop_reason["reason"] = f"disk cap {max_bytes} bytes reached"
                         stop.set()
                     if stop.is_set():
                         break
@@ -139,10 +157,10 @@ async def run_recorder(
                     await result
         if not stop.is_set():
             failures = 0 if delivered else failures + 1
-            delay = min(max_reconnect_delay, reconnect_delay * (2 ** max(0, failures - 1)))
+            delay = min(max_reconnect_delay, reconnect_delay * (2 ** min(max(0, failures - 1), 16)))
             sink.write({"kind": "reconnect", "recv_ts": clock().isoformat(), "delay": delay})
             await sleep(delay)
-    sink.write({"kind": "stop", "recv_ts": clock().isoformat(), "events": written})
+    sink.write({"kind": "stop", "recv_ts": clock().isoformat(), "events": written, **stop_reason})
     return written
 
 
@@ -158,6 +176,7 @@ async def record_market(
     seconds: float | None,
     reconnect_delay: float = 2.0,
     price_symbols: tuple[str, str] | None = None,
+    max_bytes: int | None = None,
 ) -> int:
     """Record `token_ids` (and, with `price_symbols`, the Binance spot, Chainlink spot and
     Chainlink 60 s TWAP reference prices); a fresh client per connection, closed at end."""
@@ -200,6 +219,7 @@ async def record_market(
             sink,
             stop=stop,
             reconnect_delay=reconnect_delay,
+            max_bytes=max_bytes,
             on_connection_closed=closed,
         )
     )

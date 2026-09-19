@@ -17,10 +17,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from paperfill import __version__, schema
 from paperfill.book import OrderBook
 from paperfill.execution import Fill, MarketParams, OrderType, PaperExecutor, Portfolio
 from paperfill.history import TradePrint
 from paperfill.journal import Journal
+from paperfill.log import get as get_logger
 from paperfill.markets import MarketInfo
 from paperfill.recorder import open_text
 from paperfill.risk import Intent, Mode, RiskEngine, RiskLimits
@@ -81,11 +83,16 @@ def recording_covers_resolution(path: Path, market_end: datetime | None) -> bool
 def events_from_recording(path: Path) -> Iterator[Event]:
     """Turn a recorder file into events; `last_trade_price` becomes a TradePrint."""
     seq = 0
+    first = True
     with open_text(path) as f:
         for line in f:
             if not line.strip():
                 continue
             r = json.loads(line)
+            if first:
+                first = False
+                if r.get("kind") == "start":
+                    schema.check("recording", r, schema.RECORDING_SCHEMA)
             kind, p = r["kind"], r.get("payload", {})
             ts = datetime.fromisoformat(r["recv_ts"])
             if kind == "book":
@@ -144,8 +151,10 @@ class Runner:
         config: RunConfig,
         *,
         mode: str,
+        resume: bool = False,
     ) -> None:
         self.market, self.strategy, self.journal, self.config = market, strategy, journal, config
+        self.mode = mode
         self.now = datetime.now(UTC)
         self.executor = PaperExecutor(
             MarketParams(market.fees, market.tick_size, market.min_order_size),
@@ -172,8 +181,15 @@ class Runner:
         self.events = 0
         self.halted: str | None = None
         self._last_mark: datetime | None = None
+        self._resume_after: datetime | None = None
+        self.log = get_logger("runner")
+        if resume:
+            self._rebuild()
+            return
         self.journal.record(
             "run_start",
+            schema=schema.JOURNAL_SCHEMA,
+            paperfill=__version__,
             mode=mode,
             market=market.condition_id,
             question=market.question,
@@ -218,6 +234,62 @@ class Runner:
             cash=self.portfolio.cash,
             exposure=self.portfolio.exposure(marks),
             marks=marks,
+            events=self.events,
+            last_ts=self.now,
+        )
+
+    # -- resume -------------------------------------------------------------------
+
+    def _rebuild(self) -> None:
+        """Rebuild portfolio and progress from an existing journal (after a halt or crash).
+
+        Open orders are not restored: a halt cancelled them, a crash lost them, and either
+        way the strategy re-quotes. The fair-value model restarts from the next prices.
+        """
+        entries = self.journal.entries
+        if not entries or entries[0].kind != "run_start":
+            raise ValueError("cannot resume: journal has no run_start")
+        schema.check("journal", entries[0].data, schema.JOURNAL_SCHEMA)
+        if entries[0].data["market"] != self.market.condition_id:
+            raise ValueError("cannot resume: journal belongs to another market")
+        if any(e.kind == "settle" for e in entries):
+            raise ValueError("cannot resume: this run was already settled")
+        checkpoint_events, checkpoint_ts = 0, None
+        for e in entries:
+            d = e.data
+            if e.kind == "fill":
+                fill = Fill(
+                    order_id=d["order_id"],
+                    token_id=d["token"],
+                    side=d["side"],
+                    price=Decimal(d["price"]),
+                    size=Decimal(d["size"]),
+                    fee=Decimal(d["fee"]),
+                    rebate_estimate=Decimal(d["rebate_estimate"]),
+                    liquidity=d["liquidity"],
+                    ts=self.now,
+                )
+                self.portfolio.apply(fill)
+                self.fills.append(fill)
+            elif e.kind == "mark" and "events" in d:
+                checkpoint_events = int(d["events"])
+                checkpoint_ts = datetime.fromisoformat(d["last_ts"])
+        self.events = checkpoint_events
+        self._resume_after = checkpoint_ts
+        if checkpoint_ts is not None:
+            self.now = checkpoint_ts
+        self.risk.run_start_equity = self.config.capital
+        self.risk._roll_day(self.config.capital, self.now)
+        self.journal.record(
+            "resume",
+            paperfill=__version__,
+            events_done=self.events,
+            resumed_after=checkpoint_ts,
+            fills_rebuilt=len(self.fills),
+            cash=self.portfolio.cash,
+        )
+        self.log.info(
+            "resume", extra={"data": {"events_done": self.events, "fills": len(self.fills)}}
         )
 
     # -- event handling ---------------------------------------------------------
@@ -280,6 +352,7 @@ class Runner:
             self.halted = reason
             self._mark(force=True)  # the trough that tripped the breaker is on record
             self.journal.record("risk_halt", reason=reason)
+            self.log.warning("halt", extra={"data": {"reason": reason, "events": self.events}})
             for o in self.executor.cancel_all("risk halt"):
                 self.journal.record("order_cancelled", order_id=o.id, reason=o.reason)
 
@@ -377,9 +450,18 @@ class Runner:
     def run(
         self, events: Iterable[Event], *, payouts: dict[str, Decimal] | None = None
     ) -> RunResult:
+        skipped = 0
         for event in events:
+            if self._resume_after is not None and event.ts <= self._resume_after:
+                skipped += 1
+                continue
+            if skipped:
+                self.journal.record("resume_skipped", events=skipped)
+                skipped = 0
             self._handle(event)
             self._lifecycle()
+            if self.halted:
+                break  # a halt stops the run; `run --resume` continues it later
             self._strategy()
             self._mark()
         for o in self.executor.cancel_all("run end"):
@@ -408,5 +490,16 @@ class Runner:
             rebates_estimated=self.portfolio.rebates_estimated,
             halted=self.halted,
             settled=settled,
+        )
+        self.log.info(
+            "run_end",
+            extra={
+                "data": {
+                    "events": self.events,
+                    "fills": len(self.fills),
+                    "realized_pnl": str(self.portfolio.realized_pnl),
+                    "halted": self.halted,
+                }
+            },
         )
         return RunResult(self.portfolio, self.fills, self.events, self.halted, settled, payouts)

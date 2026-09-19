@@ -29,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="paperfill",
         description="Paper-trading harness for Polymarket. Never places live orders.",
     )
+    parser.add_argument(
+        "--log-level", default="INFO", help="JSON log level on stderr (DEBUG, INFO, WARNING)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("version", help="print the installed version and exit")
 
@@ -59,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--no-prices", action="store_true", help="do not record Binance/Chainlink reference prices"
     )
+    record.add_argument(
+        "--max-mb", type=float, default=2048.0, help="stop when the file exceeds this many MB"
+    )
 
     run = sub.add_parser("run", help="paper-trade a strategy over a replayed tape or a recording")
     run.add_argument("--condition", required=True, help="market condition id (0x...)")
@@ -70,12 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--history-dir", type=Path, default=Path("data/history"))
     run.add_argument("--runs-dir", type=Path, default=Path("data/runs"))
-    run.add_argument("--capital", type=_decimal, default=Decimal("100"))
-    run.add_argument("--size", type=_decimal, default=Decimal("5"), help="base quote size, shares")
+    run.add_argument("--capital", type=_decimal, default=None)
+    run.add_argument("--size", type=_decimal, default=None, help="base quote size, shares")
     run.add_argument(
         "--strategy",
         choices=["two-sided", "fair-value", "taker-probe"],
-        default="two-sided",
+        default=None,
         help="two-sided: lean by mid drift; fair-value: lean by an external fair value "
         "(needs a recording that includes reference prices)",
     )
@@ -85,14 +91,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=Decimal("0.02"),
         help="fair-value: minimum edge to quote a lone side",
     )
-    run.add_argument("--max-order", type=_decimal, default=Decimal("50"), help="max order notional")
+    run.add_argument("--max-order", type=_decimal, default=None)
+    run.add_argument("--max-position", type=_decimal, default=None)
+    run.add_argument("--max-market", type=_decimal, default=None)
+    run.add_argument("--max-exposure", type=_decimal, default=None)
+    run.add_argument("--daily-loss", type=_decimal, default=None)
+    run.add_argument("--total-loss", type=_decimal, default=None)
+    run.add_argument("--config", type=Path, default=None, help="TOML settings file (flags win)")
     run.add_argument(
-        "--max-position", type=_decimal, default=Decimal("100"), help="max shares/token"
+        "--resume",
+        type=Path,
+        default=None,
+        metavar="RUN_DIR",
+        help="continue a halted or interrupted run from its journal (remove its KILL file first)",
     )
-    run.add_argument("--max-market", type=_decimal, default=Decimal("100"), help="max cost/market")
-    run.add_argument("--max-exposure", type=_decimal, default=Decimal("200"))
-    run.add_argument("--daily-loss", type=_decimal, default=Decimal("20"))
-    run.add_argument("--total-loss", type=_decimal, default=Decimal("50"))
 
     report = sub.add_parser("report", help="rebuild the report of a run from its journal")
     report.add_argument("run_dir", type=Path)
@@ -261,6 +273,7 @@ def _cmd_record(args: argparse.Namespace, source_factory: Callable[[], Any]) -> 
                 sink,
                 seconds=args.seconds,
                 price_symbols=None if args.no_prices else market.price_symbols,
+                max_bytes=int(args.max_mb * 1_000_000),
             )
         )
     finally:
@@ -443,23 +456,61 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
                     close()
             save_trades(path, args.condition, trades, fetched_at=datetime.now(UTC))
         events = replay(trades)
-    started = datetime.now(UTC)
-    run_dir = args.runs_dir / f"{started.strftime('%Y%m%dT%H%M%SZ')}-{args.condition[:10]}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    from paperfill.config import Settings
+
+    settings = Settings.load(args.config)
+    settings.override("run", "capital", args.capital)
+    settings.override("run", "size", args.size)
+    settings.override("run", "strategy", args.strategy)
+    settings.override("run", "min_edge", args.min_edge)
+    for key in (
+        "max_order",
+        "max_position",
+        "max_market",
+        "max_exposure",
+        "daily_loss",
+        "total_loss",
+    ):
+        settings.override("risk", key, getattr(args, key))
+    if args.resume is not None:
+        run_dir = args.resume
+        if (run_dir / "KILL").exists():
+            print(f"refusing to resume: {run_dir / 'KILL'} is present; remove it first")
+            return 1
+        if not (run_dir / "journal.jsonl").exists():
+            print(f"nothing to resume in {run_dir}")
+            return 1
+    else:
+        started = datetime.now(UTC)
+        run_dir = args.runs_dir / f"{started.strftime('%Y%m%dT%H%M%SZ')}-{args.condition[:10]}"
+        run_dir.mkdir(parents=True, exist_ok=True)
     limits = RiskLimits(
-        max_order_notional=args.max_order,
-        max_position_shares=args.max_position,
-        max_market_notional=args.max_market,
-        max_total_exposure=args.max_exposure,
-        daily_loss_limit=args.daily_loss,
-        total_loss_limit=args.total_loss,
+        max_order_notional=settings.decimal("risk", "max_order"),
+        max_position_shares=settings.decimal("risk", "max_position"),
+        max_market_notional=settings.decimal("risk", "max_market"),
+        max_total_exposure=settings.decimal("risk", "max_exposure"),
+        daily_loss_limit=settings.decimal("risk", "daily_loss"),
+        total_loss_limit=settings.decimal("risk", "total_loss"),
     )
-    config = RunConfig(capital=args.capital, limits=limits, kill_file=run_dir / "KILL")
+    config = RunConfig(
+        capital=settings.decimal("run", "capital"),
+        limits=limits,
+        kill_file=run_dir / "KILL",
+        vol_sample_seconds=float(settings.get("model", "vol_sample_seconds")),
+        vol_halflife_seconds=float(settings.get("model", "vol_halflife_seconds")),
+    )
     journal = Journal.open(run_dir / "journal.jsonl")
-    strategy: Any = _make_strategy(args.strategy, args.size, args.min_edge)()
-    print(f"run: {market.question} [{mode}] -> {run_dir}")
+    strategy: Any = _make_strategy(
+        settings.get("run", "strategy"),
+        settings.decimal("run", "size"),
+        settings.decimal("run", "min_edge"),
+    )()
+    print(f"run: {market.question} [{mode}] -> {run_dir}" + ("  (resumed)" if args.resume else ""))
     try:
-        result = Runner(market, strategy, journal, config, mode=mode).run(events, payouts=payouts)
+        runner = Runner(
+            market, strategy, journal, config, mode=mode, resume=args.resume is not None
+        )
+        result = runner.run(events, payouts=payouts)
     finally:
         journal.close()
     metrics = compute(journal.entries)
@@ -514,6 +565,9 @@ def main(
     argv: Sequence[str] | None = None, *, source_factory: Callable[[], Any] = _default_source
 ) -> int:
     args = build_parser().parse_args(argv)
+    from paperfill.log import setup as setup_logging
+
+    setup_logging(args.log_level)
     if args.command == "version":
         print(__version__)
         return 0

@@ -62,7 +62,22 @@ outcome); the tape itself is read locally. A recording that does not reach the
 market's end time is marked to market at its last mark instead of being settled.
 
 Run parameters: `--capital`, `--size`, `--max-order`, `--max-position`, `--max-market`,
-`--max-exposure`, `--daily-loss`, `--total-loss`.
+`--max-exposure`, `--daily-loss`, `--total-loss`, or a TOML file via `--config`
+(`src/paperfill/config.py` documents the sections; a flag on the command line wins
+over the file). `run --resume <run-dir>` continues a halted or interrupted run from
+its journal after you remove the `KILL` file: fills and progress are rebuilt from the
+journal, open orders are not (they were cancelled on halt).
+
+Research over many windows: `collect` records consecutive windows for hours,
+`batch --workers N` runs one strategy over every recording in parallel (results are
+byte-identical to a sequential run), `calibrate` scores the fair-value model against
+the book mid (Brier, reliability), `sweep` tries a parameter grid on earlier windows
+and reports the chosen combination on later ones.
+
+Files carry a schema version (`start` record of a recording, `run_start` entry of a
+journal); readers refuse newer schemas instead of misreading them. `record --max-mb`
+caps the file size. Logs are JSON lines on stderr (`--log-level`); the dashboard
+answers `/healthz`.
 
 ## Sample strategies
 

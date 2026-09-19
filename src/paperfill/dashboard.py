@@ -179,6 +179,12 @@ def create_app(run_dir: Path, *, kill_token: str | None = None) -> FastAPI:
             headers={"Location": "/"},
         )
 
+    @app.get("/healthz")
+    def healthz() -> JSONResponse:
+        state, _, _subtitle, entries, error = _state(run_dir)
+        body = {"status": "error" if error else "ok", "state": state, "entries": len(entries)}
+        return JSONResponse(body, status_code=503 if error else 200)
+
     @app.get("/api/report.json")
     def report_json() -> JSONResponse:
         state, _, subtitle, entries, error = _state(run_dir)
