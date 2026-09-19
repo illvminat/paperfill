@@ -31,6 +31,20 @@
 | Маркет-мейкинг | polymarket/market-making.md | типы ордеров для котирования, риск-контроль, kill switch, батчи, реальное время вместо опроса | 2026-09-19 |
 | Смысл площадки | polymarket/polymarket-101.md, concepts-prices-orderbook.md | цена как вероятность, чем является рынок предсказаний | 2026-09-19 |
 
+## MCP — как устроено и как правильно
+
+| Область | Источник | Отвечает на | Загружен |
+|---|---|---|---|
+| SDK | mcp/sdk-servers.md, sdk-tools.md, sdk-structured-output.md, sdk-handling-errors.md, sdk-resources.md, sdk-run.md, sdk-testing.md, sdk-client.md | MCPServer, @tool, схема из аннотаций, ToolError, ресурсы, stdio, клиент в процессе | 2026-09-19 |
+| Спецификация | mcp/spec-tools.md, spec-resources.md (руководство), spec-stdio.md | имена и аннотации инструментов, isError, stdout только для кадров | 2026-09-19 |
+
+## Kalshi — как устроено (для адаптера данных)
+
+| Область | Источник | Отвечает на | Загружен |
+|---|---|---|---|
+| Рыночные данные | kalshi/quick-start-market-data.md, get-markets.md, get-market.md, get-market-orderbook.md, get-trades.md, get-events.md, rate-limits.md | публичные REST-эндпоинты без ключа, формат стакана (только bids yes/no), лимиты | 2026-09-19 |
+| WebSocket | kalshi/websocket-connection.md, websocket-orderbook-updates.md | соединение требует аутентификации; канал orderbook_delta | 2026-09-19 |
+
 ## Инструменты
 
 | Область | Источник | Отвечает на | Загружен |
@@ -52,3 +66,4 @@
 | Действующие комиссии | https://help.polymarket.com/en/articles/13364478-trading-fees | ставки меняются, docs могут отставать |
 | Право Узбекистана | https://lex.uz/docs/3806048 | ПП-3832 п. 3(д): операции с крипто-активами только через национальных провайдеров |
 | Версия SDK | https://pypi.org/project/polymarket-client/ | версия и лицензия меняются |
+| Условия Kalshi | https://kalshi.com/terms | юридический документ; автоматизированный доступ и использование данных |
