@@ -1,7 +1,7 @@
 .PHONY: sync lint fmt test check sources-check docker
 
 sync:
-	uv sync --all-groups
+	uv sync --all-groups --all-extras
 
 lint:
 	uv run ruff check .

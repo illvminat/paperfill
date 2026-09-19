@@ -28,7 +28,7 @@ hash-chained log and produces an honest metrics report.
 ## Install
 
 ```sh
-uv sync --all-groups
+uv sync --all-groups --all-extras
 uv run paperfill --help
 ```
 
