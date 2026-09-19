@@ -89,6 +89,12 @@ class BatchOut(BaseModel):
     markdown: str
 
 
+class PairsOut(BaseModel):
+    summary: dict[str, Any]
+    windows: list[dict[str, Any]]
+    markdown: str
+
+
 class CalibrationOut(BaseModel):
     windows: int
     brier_model: dict[str, float | None]
@@ -416,6 +422,34 @@ def create_server(
             brier_model={str(k): v for k, v in cal.brier_model.items()},
             brier_mid={str(k): v for k, v in cal.brier_mid.items()},
             markdown=to_markdown(cal),
+        )
+
+    @mcp.tool(annotations=WRITES_LOCAL)
+    def scan_pairs(recordings_dir: str | None = None) -> PairsOut:
+        """Find moments when Up+Down asks cost less than 1 after taker fees, per recording."""
+        from paperfill.batch import condition_of
+        from paperfill.pairs import scan_recording, summarize, to_markdown
+
+        rec_dir = Path(recordings_dir) if recordings_dir else record_dir
+        recs = (
+            [p for p in rec_dir.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+            if rec_dir.is_dir()
+            else []
+        )
+        if not recs:
+            raise ToolError(f"no recordings in {rec_dir}")
+        markets = _load_markets(factory, recs)
+        scans = []
+        for p in sorted(recs):
+            cid = condition_of(p)
+            m = markets.get(cid) if cid else None
+            if m is not None:
+                scans.append(scan_recording(p, m))
+        summary = summarize(scans)
+        return PairsOut(
+            summary=summary,
+            windows=[s.to_json() for s in scans],
+            markdown=to_markdown(scans, summary),
         )
 
     @mcp.tool(

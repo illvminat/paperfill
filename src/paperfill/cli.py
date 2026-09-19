@@ -157,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--out", type=Path, default=Path("data/calibration"))
     cal.add_argument("--offsets", default="30,60,120,180,240", help="seconds after window start")
 
+    pairs = sub.add_parser(
+        "pairs", help="scan recordings for Up+Down pairs priced below 1 after fees"
+    )
+    pairs.add_argument("--recordings", type=Path, default=Path("data/record"), help="directory")
+    pairs.add_argument("--out", type=Path, default=Path("data/pairs"))
+
     mcp = sub.add_parser("mcp", help="serve paperfill as an MCP server over stdio")
     mcp.add_argument("--data-dir", type=Path, default=Path("data"))
 
@@ -484,6 +490,34 @@ def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
     return 0
 
 
+def _cmd_pairs(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.batch import condition_of
+    from paperfill.pairs import scan_recording, summarize, to_markdown
+
+    recs = _recordings_in(args.recordings)
+    if not recs:
+        print(f"no recordings (*.jsonl, *.jsonl.gz) in {args.recordings}")
+        return 1
+    markets = _load_markets(source_factory, recs)
+    scans = []
+    for p in sorted(recs):
+        cid = condition_of(p)
+        m = markets.get(cid) if cid else None
+        if m is None:
+            continue
+        scans.append(scan_recording(p, m))
+    summary = summarize(scans)
+    md = to_markdown(scans, summary)
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "pairs.md").write_text(md, encoding="utf-8")
+    (args.out / "pairs.json").write_text(
+        json.dumps({"summary": summary, "windows": [s.to_json() for s in scans]}, indent=2),
+        encoding="utf-8",
+    )
+    print(md)
+    return 0
+
+
 def _cmd_calibrate(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.batch import condition_of
     from paperfill.calibration import run_calibration, save, to_markdown
@@ -633,6 +667,8 @@ def main(
         return _cmd_kill(args)
     if args.command == "calibrate":
         return _cmd_calibrate(args, source_factory)
+    if args.command == "pairs":
+        return _cmd_pairs(args, source_factory)
     if args.command == "sweep":
         return _cmd_sweep(args, source_factory)
     if args.command == "collect":
