@@ -129,7 +129,7 @@ def test_risk_halt_cancels_and_blocks(gamma_market_raw, tmp_path):
     ]
     result = runner.run(tape, payouts={up: D("1"), m.no_token: D("0")})
     assert result.halted and result.halted.startswith("total loss limit")
-    assert not result.settled and runner.portfolio.positions[up].size == D("5")  # kept for resume
+    assert result.settled  # a breaker halt is a final outcome: it settles and counts
     kinds = [e.kind for e in journal.entries]
     assert "risk_halt" in kinds
     assert not any(e.kind == "order_submitted" for e in journal.entries[kinds.index("risk_halt") :])

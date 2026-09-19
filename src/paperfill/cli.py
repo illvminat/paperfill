@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--min-edge",
         type=_decimal,
-        default=Decimal("0.02"),
+        default=None,
         help="fair-value: minimum edge to quote a lone side",
     )
     run.add_argument("--max-order", type=_decimal, default=None)
@@ -127,12 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--recordings", type=Path, default=Path("data/record"), help="directory")
     batch.add_argument("--out", type=Path, default=Path("data/batch"))
     batch.add_argument(
-        "--strategy", choices=["two-sided", "fair-value", "taker-probe"], default="fair-value"
+        "--strategy", choices=["two-sided", "fair-value", "taker-probe"], default=None
     )
-    batch.add_argument("--capital", type=_decimal, default=Decimal("100"))
-    batch.add_argument("--size", type=_decimal, default=Decimal("5"))
-    batch.add_argument("--min-edge", type=_decimal, default=Decimal("0.02"))
+    batch.add_argument("--capital", type=_decimal, default=None)
+    batch.add_argument("--size", type=_decimal, default=None)
+    batch.add_argument("--min-edge", type=_decimal, default=None)
     batch.add_argument("--workers", type=int, default=1, help="parallel processes")
+    batch.add_argument("--config", type=Path, default=None, help="TOML settings file (flags win)")
 
     sweep = sub.add_parser("sweep", help="parameter grid on earlier windows, judged on later ones")
     sweep.add_argument("--recordings", type=Path, default=Path("data/record"))
@@ -146,6 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="JSON file {param: [values]}; default grid otherwise",
+    )
+    sweep.add_argument(
+        "--config", type=Path, default=None, help="TOML settings file for capital, risk, model"
     )
 
     cal = sub.add_parser("calibrate", help="calibrate the fair-value model across recordings")
@@ -300,16 +304,84 @@ def _load_market(source_factory: Callable[[], Any], condition_id: str) -> Any:
     return None
 
 
-def _make_strategy(name: str, size: Decimal, min_edge: Decimal) -> Callable[[], Any]:
+def _make_strategy(
+    name: str, size: Decimal, min_edge: Decimal, extra: dict[str, Any] | None = None
+) -> Callable[[], Any]:
+    """Picklable factory for a strategy by name; `extra` is the [strategy] config section."""
+    from datetime import timedelta
     from functools import partial
 
     from paperfill.strategy import FairValueQuoter, TakerProbe, TwoSidedQuoter
 
+    x = extra or {}
     if name == "fair-value":
-        return partial(FairValueQuoter, size=size, min_edge=min_edge)
+        stop = int(x.get("stop_after_s", 0) or 0)
+        return partial(
+            FairValueQuoter,
+            size=size,
+            min_edge=min_edge,
+            edge_gain=Decimal(str(x.get("edge_gain", "10"))),
+            shrink_to_mid=Decimal(str(x.get("shrink_to_mid", "0"))),
+            stop_after=timedelta(seconds=stop) if stop else None,
+        )
     if name == "taker-probe":
         return partial(TakerProbe, size=size)
-    return partial(TwoSidedQuoter, size=size)
+    return partial(
+        TwoSidedQuoter,
+        size=size,
+        lookback=timedelta(seconds=int(x.get("lookback_s", 30))),
+        lean_gain=Decimal(str(x.get("lean_gain", "20"))),
+    )
+
+
+def _settings_from(args: argparse.Namespace) -> Any:
+    """Settings = defaults < TOML file (--config) < explicit flags."""
+    from paperfill.config import Settings
+
+    settings = Settings.load(getattr(args, "config", None))
+    for key in ("capital", "size", "strategy", "min_edge"):
+        settings.override("run", key, getattr(args, key, None))
+    risk_keys = (
+        "max_order",
+        "max_position",
+        "max_market",
+        "max_exposure",
+        "daily_loss",
+        "total_loss",
+    )
+    for key in risk_keys:
+        settings.override("risk", key, getattr(args, key, None))
+    return settings
+
+
+def _run_config_from(settings: Any, kill_file: Path | None) -> Any:
+    from paperfill.risk import RiskLimits
+    from paperfill.runner import RunConfig
+
+    limits = RiskLimits(
+        max_order_notional=settings.decimal("risk", "max_order"),
+        max_position_shares=settings.decimal("risk", "max_position"),
+        max_market_notional=settings.decimal("risk", "max_market"),
+        max_total_exposure=settings.decimal("risk", "max_exposure"),
+        daily_loss_limit=settings.decimal("risk", "daily_loss"),
+        total_loss_limit=settings.decimal("risk", "total_loss"),
+    )
+    return RunConfig(
+        capital=settings.decimal("run", "capital"),
+        limits=limits,
+        kill_file=kill_file,
+        vol_sample_seconds=float(settings.get("model", "vol_sample_seconds")),
+        vol_halflife_seconds=float(settings.get("model", "vol_halflife_seconds")),
+    )
+
+
+def _strategy_factory(settings: Any) -> Callable[[], Any]:
+    return _make_strategy(
+        settings.get("run", "strategy"),
+        settings.decimal("run", "size"),
+        settings.decimal("run", "min_edge"),
+        settings.values["strategy"],
+    )
 
 
 def _cmd_collect(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
@@ -352,7 +424,6 @@ def _load_markets(source_factory: Callable[[], Any], recordings: list[Path]) -> 
 
 
 def _cmd_sweep(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
-    from paperfill.runner import RunConfig
     from paperfill.sweep import DEFAULT_GRIDS, sweep, to_markdown
 
     recs = _recordings_in(args.recordings)
@@ -367,7 +438,7 @@ def _cmd_sweep(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
         strategy=args.strategy,
         grid=grid,
         size=args.size,
-        base_config=RunConfig(),
+        base_config=_run_config_from(_settings_from(args), None),
         out_dir=args.out / args.strategy,
         train_share=args.train_share,
         workers=args.workers,
@@ -378,24 +449,31 @@ def _cmd_sweep(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
 
 def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.batch import run_batch, summarize, to_markdown
-    from paperfill.runner import RunConfig
 
     recs = _recordings_in(args.recordings)
     if not recs:
         print(f"no recordings (*.jsonl, *.jsonl.gz) in {args.recordings}")
         return 1
-    out = args.out / args.strategy
+    settings = _settings_from(args)
+    if (
+        settings.get("run", "strategy") == "two-sided"
+        and args.strategy is None
+        and args.config is None
+    ):
+        settings.values["run"]["strategy"] = "fair-value"  # batch's historical default
+    name = settings.get("run", "strategy")
+    out = args.out / name
     markets = _load_markets(source_factory, recs)
     results = run_batch(
         recs,
         markets.get,
-        _make_strategy(args.strategy, args.size, args.min_edge),
-        config=RunConfig(capital=args.capital),
+        _strategy_factory(settings),
+        config=_run_config_from(settings, None),
         out_dir=out,
         workers=args.workers,
     )
     summary = summarize(results)
-    md = to_markdown(results, summary, args.strategy)
+    md = to_markdown(results, summary, name)
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.md").write_text(md, encoding="utf-8")
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -424,9 +502,7 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
     from paperfill.history import fetch_trades, history_path, load_trades, replay, save_trades
     from paperfill.journal import Journal
     from paperfill.report import compute, to_json, to_markdown
-    from paperfill.risk import RiskLimits
     from paperfill.runner import (
-        RunConfig,
         Runner,
         events_from_recording,
         recording_covers_resolution,
@@ -456,22 +532,7 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
                     close()
             save_trades(path, args.condition, trades, fetched_at=datetime.now(UTC))
         events = replay(trades)
-    from paperfill.config import Settings
-
-    settings = Settings.load(args.config)
-    settings.override("run", "capital", args.capital)
-    settings.override("run", "size", args.size)
-    settings.override("run", "strategy", args.strategy)
-    settings.override("run", "min_edge", args.min_edge)
-    for key in (
-        "max_order",
-        "max_position",
-        "max_market",
-        "max_exposure",
-        "daily_loss",
-        "total_loss",
-    ):
-        settings.override("risk", key, getattr(args, key))
+    settings = _settings_from(args)
     if args.resume is not None:
         run_dir = args.resume
         if (run_dir / "KILL").exists():
@@ -484,27 +545,9 @@ def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int
         started = datetime.now(UTC)
         run_dir = args.runs_dir / f"{started.strftime('%Y%m%dT%H%M%SZ')}-{args.condition[:10]}"
         run_dir.mkdir(parents=True, exist_ok=True)
-    limits = RiskLimits(
-        max_order_notional=settings.decimal("risk", "max_order"),
-        max_position_shares=settings.decimal("risk", "max_position"),
-        max_market_notional=settings.decimal("risk", "max_market"),
-        max_total_exposure=settings.decimal("risk", "max_exposure"),
-        daily_loss_limit=settings.decimal("risk", "daily_loss"),
-        total_loss_limit=settings.decimal("risk", "total_loss"),
-    )
-    config = RunConfig(
-        capital=settings.decimal("run", "capital"),
-        limits=limits,
-        kill_file=run_dir / "KILL",
-        vol_sample_seconds=float(settings.get("model", "vol_sample_seconds")),
-        vol_halflife_seconds=float(settings.get("model", "vol_halflife_seconds")),
-    )
+    config = _run_config_from(settings, run_dir / "KILL")
     journal = Journal.open(run_dir / "journal.jsonl")
-    strategy: Any = _make_strategy(
-        settings.get("run", "strategy"),
-        settings.decimal("run", "size"),
-        settings.decimal("run", "min_edge"),
-    )()
+    strategy: Any = _strategy_factory(settings)()
     print(f"run: {market.question} [{mode}] -> {run_dir}" + ("  (resumed)" if args.resume else ""))
     try:
         runner = Runner(

@@ -276,3 +276,153 @@ def test_json_log_lines_on_stderr(capsys):
     err = capsys.readouterr().err.strip().splitlines()[-1]
     rec = json.loads(err)
     assert rec["msg"] == "hello" and rec["k"] == 1 and rec["level"] == "INFO"
+
+
+def test_gap_does_not_mark_positions_at_zero(gamma_market_raw):
+    from paperfill.book import OrderBook
+    from paperfill.runner import BookEvent, GapEvent
+
+    m = from_gamma_json(gamma_market_raw)
+    up = m.yes_token
+    journal = Journal(clock=_clock())
+    cfg = RunConfig(
+        capital=D("100"),
+        limits=__import__("paperfill.risk", fromlist=["RiskLimits"]).RiskLimits(
+            daily_loss_limit=D("5")
+        ),
+    )
+    runner = Runner(
+        m, TwoSidedQuoter(size=D("5"), requote_every=timedelta(0)), journal, cfg, mode="record"
+    )
+    book = OrderBook.from_snapshot(
+        {
+            "token_id": up,
+            "bids": [{"price": "0.60", "size": "100"}],
+            "asks": [{"price": "0.62", "size": "100"}],
+        }
+    )
+    events = [
+        BookEvent(T0, book),
+        TradePrint(
+            T0 + timedelta(seconds=1), 0, "SELL", D("0.58"), D("5"), up, "Up"
+        ),  # fills our 0.60 bid... at 0.59? no: bid joins 0.60
+        GapEvent(T0 + timedelta(seconds=2), "socket closed"),
+        TradePrint(T0 + timedelta(seconds=3), 1, "BUY", D("0.61"), D("1"), up, "Up"),
+    ]
+    result = runner.run(events)
+    assert result.halted is None  # inventory kept its last mark through the gap
+    marks = [e.data["marks"] for e in journal.entries if e.kind == "mark"]
+    assert all(up in mk for mk in marks[1:])
+
+
+def test_price_change_fill_is_stamped_with_the_event_time(gamma_market_raw):
+    from paperfill.book import OrderBook
+    from paperfill.runner import BookEvent, PriceChangeEvent
+
+    m = from_gamma_json(gamma_market_raw)
+    up = m.yes_token
+    journal = Journal(clock=_clock())
+    runner = Runner(
+        m,
+        TwoSidedQuoter(size=D("5"), requote_every=timedelta(0)),
+        journal,
+        RunConfig(),
+        mode="record",
+    )
+    snap = OrderBook.from_snapshot(
+        {
+            "token_id": up,
+            "bids": [{"price": "0.60", "size": "100"}],
+            "asks": [{"price": "0.62", "size": "100"}],
+            "timestamp": T0.isoformat(),
+        }
+    )
+    later = T0 + timedelta(seconds=42)
+    result = runner.run(
+        [
+            BookEvent(T0, snap),  # strategy bids 0.60 (joins the best bid)
+            PriceChangeEvent(
+                later, up, {"side": "SELL", "price": "0.59", "size": "3"}
+            ),  # ask through our bid
+        ]
+    )
+    assert len(result.fills) == 1 and result.fills[0].ts == later
+
+
+def test_resume_restores_breaker_baselines_and_marks(tmp_path, gamma_market_raw):
+    from paperfill.risk import RiskLimits
+
+    m = from_gamma_json(gamma_market_raw)
+    up = m.yes_token
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    kill = run_dir / "KILL"
+    cfg = RunConfig(capital=D("100"), limits=RiskLimits(daily_loss_limit=D("3")), kill_file=kill)
+    j1 = Journal.open(run_dir / "journal.jsonl", clock=_clock())
+    r1 = Runner(
+        m,
+        TwoSidedQuoter(size=D("5"), requote_every=timedelta(0), quote_ttl=None),
+        j1,
+        cfg,
+        mode="replay",
+    )
+    t = lambda s: T0 + timedelta(seconds=s)  # noqa: E731
+    tape = [
+        TradePrint(t(0), 0, "BUY", D("0.60"), D("50"), up, "Up"),
+        TradePrint(t(6), 1, "SELL", D("0.58"), D("5"), up, "Up"),  # we hold 5 @ 0.59
+    ]
+
+    def with_kill():
+        yield from tape
+        kill.write_text("stop")
+        yield TradePrint(t(7), 2, "BUY", D("0.60"), D("1"), up, "Up")
+
+    first = r1.run(with_kill())
+    j1.close()
+    assert first.halted.startswith("kill switch") and first.portfolio.positions[up].size == D("5")
+    kill.unlink()
+    j2 = Journal.open(run_dir / "journal.jsonl", clock=_clock())
+    r2 = Runner(
+        m,
+        TwoSidedQuoter(size=D("5"), requote_every=timedelta(0), quote_ttl=None),
+        j2,
+        cfg,
+        mode="replay",
+        resume=True,
+    )
+    # baselines come from the last checkpoint, and the inventory keeps its last mark
+    assert r2.risk.run_start_equity == D("100") and r2.risk.day_start_equity == D("100")
+    assert r2.marks()[up] == D("0.60")
+    second = r2.run([TradePrint(t(8), 3, "BUY", D("0.61"), D("1"), up, "Up")])
+    j2.close()
+    assert second.halted is None  # no false halt from "unknown = zero"
+
+
+def test_strategy_section_and_min_edge_from_config_reach_the_factory(tmp_path):
+    from paperfill.cli import _make_strategy, _settings_from
+    from paperfill.strategy import FairValueQuoter, TwoSidedQuoter
+
+    cfg = tmp_path / "s.toml"
+    cfg.write_text(
+        '[run]\nstrategy = "fair-value"\nmin_edge = "0.07"\n'
+        '[strategy]\nedge_gain = "5"\nshrink_to_mid = "0.5"\nstop_after_s = 120\n'
+    )
+    args = type(
+        "A", (), {"config": cfg, "capital": None, "size": None, "strategy": None, "min_edge": None}
+    )()
+    s = _settings_from(args)
+    q = _make_strategy(
+        s.get("run", "strategy"),
+        s.decimal("run", "size"),
+        s.decimal("run", "min_edge"),
+        s.values["strategy"],
+    )()
+    assert isinstance(q, FairValueQuoter)
+    assert q.min_edge == D("0.07") and q.edge_gain == D("5") and q.shrink_to_mid == D("0.5")
+    assert q.stop_after == timedelta(seconds=120)
+    ts = _make_strategy("two-sided", D("5"), D("0.02"), {"lookback_s": 120, "lean_gain": "5"})()
+    assert (
+        isinstance(ts, TwoSidedQuoter)
+        and ts.lookback == timedelta(seconds=120)
+        and ts.lean_gain == D("5")
+    )

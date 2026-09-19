@@ -167,6 +167,7 @@ class Runner:
             market.no_token: market.condition_id,
         }
         self.last_prices: dict[str, Decimal] = {}
+        self.last_marks: dict[str, Decimal] = {}
         self.fair: FairValue | None = (
             FairValue(
                 market.window_start,
@@ -210,6 +211,11 @@ class Runner:
     # -- marks -----------------------------------------------------------------
 
     def marks(self) -> dict[str, Decimal]:
+        """Mid if a book is known, else the last print, else the last mark ever seen.
+
+        A token is never silently valued at zero because the book is unknown (after a
+        gap or a resume); it keeps its last known mark until fresh data arrives.
+        """
         out: dict[str, Decimal] = {}
         for token in (self.market.yes_token, self.market.no_token):
             book = self.executor.books.get(token)
@@ -217,6 +223,9 @@ class Runner:
                 out[token] = book.mid
             elif token in self.last_prices:
                 out[token] = self.last_prices[token]
+            elif token in self.last_marks:
+                out[token] = self.last_marks[token]
+        self.last_marks.update(out)
         return out
 
     def _mark(self, force: bool = False) -> None:
@@ -236,6 +245,9 @@ class Runner:
             marks=marks,
             events=self.events,
             last_ts=self.now,
+            run_start_equity=self.risk.run_start_equity,
+            day_start_equity=self.risk.day_start_equity,
+            day=self.risk.day,
         )
 
     # -- resume -------------------------------------------------------------------
@@ -255,6 +267,7 @@ class Runner:
         if any(e.kind == "settle" for e in entries):
             raise ValueError("cannot resume: this run was already settled")
         checkpoint_events, checkpoint_ts = 0, None
+        last_mark: dict[str, Any] | None = None
         for e in entries:
             d = e.data
             if e.kind == "fill":
@@ -274,12 +287,19 @@ class Runner:
             elif e.kind == "mark" and "events" in d:
                 checkpoint_events = int(d["events"])
                 checkpoint_ts = datetime.fromisoformat(d["last_ts"])
+                last_mark = d
         self.events = checkpoint_events
         self._resume_after = checkpoint_ts
         if checkpoint_ts is not None:
             self.now = checkpoint_ts
-        self.risk.run_start_equity = self.config.capital
-        self.risk._roll_day(self.config.capital, self.now)
+        if last_mark is not None:
+            self.last_marks = {k: Decimal(v) for k, v in (last_mark.get("marks") or {}).items()}
+            if last_mark.get("run_start_equity") is not None:
+                self.risk.run_start_equity = Decimal(last_mark["run_start_equity"])
+                self.risk.day_start_equity = Decimal(last_mark["day_start_equity"])
+                self.risk.day = datetime.fromisoformat(last_mark["day"])
+        if self.risk.run_start_equity is None:
+            self.risk.start(self.marks(), self.now)
         self.journal.record(
             "resume",
             paperfill=__version__,
@@ -328,6 +348,7 @@ class Runner:
             book = self.executor.books.get(event.token_id)
             if book is not None:
                 book.apply_price_change(event.change)
+                book.ts = event.ts  # fills found now are stamped now, not at the last snapshot
                 self._apply_fills(self.executor.on_book(book))
         elif isinstance(event, PriceEvent):
             self.now = event.ts
@@ -467,7 +488,10 @@ class Runner:
         for o in self.executor.cancel_all("run end"):
             self.journal.record("order_cancelled", order_id=o.id, reason=o.reason)
         settled = False
-        if payouts and not self.halted:  # a halted run keeps its positions for `run --resume`
+        killed = self.halted is not None and self.halted.startswith("kill switch")
+        if payouts and not killed:
+            # a loss-breaker halt is a final outcome and is settled like any other run;
+            # only a kill-switch halt keeps its positions for `run --resume`
             received = self.portfolio.settle(payouts)
             settled = True
             self.journal.record("settle", payouts=payouts, received=received)
