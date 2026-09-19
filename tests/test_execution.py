@@ -120,16 +120,17 @@ def test_resting_bid_fills_as_maker_when_print_goes_through_its_price():
     ex = executor()
     ex.on_book(book(bids=[("0.57", "50")], asks=[("0.60", "10")]))
     order, _ = ex.submit(UP, "BUY", D("0.58"), D("5"))
+    # 0.58 is a new level, so nothing queues ahead: a print at our price fills us (queue model)
     at_price = TradePrint(T0, 0, "SELL", D("0.58"), D("3"), UP, "Up")
-    assert ex.on_trade_print(at_price) == []  # exactly at our price: queue unknown, no fill
-    through = TradePrint(T0, 1, "SELL", D("0.57"), D("3"), UP, "Up")
-    fills = ex.on_trade_print(through)
+    fills = ex.on_trade_print(at_price)
     # maker: no fee; rebate estimate = 0.2 * fee-equivalent, where
     #   3 * 0.07 * 0.58 * 0.42 = 0.051156 -> 0.05116; 0.2 * 0.05116 = 0.010232 -> 0.01023
     assert fills == [
         Fill(order.id, UP, "BUY", D("0.58"), D("3"), D("0"), D("0.01023"), "maker", T0)
     ]
     assert order.remaining == D("2") and order.status is OrderStatus.OPEN
+    through = TradePrint(T0, 1, "SELL", D("0.57"), D("3"), UP, "Up")
+    assert ex.on_trade_print(through)[0].size == D("2") and order.status is OrderStatus.FILLED
 
 
 def test_resting_ask_fills_once_per_crossing_of_the_book():

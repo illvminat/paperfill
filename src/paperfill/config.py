@@ -4,6 +4,7 @@
     [risk]       max_order = "50"  max_position = "100"  max_market = "100"
                  max_exposure = "200"  daily_loss = "20"  total_loss = "50"
     [model]      vol_sample_seconds = 0.0  vol_halflife_seconds = 60.0
+                 queue_model = true  assumed_queue_ahead = "0"
     [strategy]   edge_gain = "10"  shrink_to_mid = "0"  stop_after_s = 0
                  lookback_s = 30  lean_gain = "20"
 
@@ -29,7 +30,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "daily_loss": "20",
         "total_loss": "50",
     },
-    "model": {"vol_sample_seconds": 0.0, "vol_halflife_seconds": 60.0},
+    "model": {
+        "vol_sample_seconds": 0.0,
+        "vol_halflife_seconds": 60.0,
+        "queue_model": True,
+        "assumed_queue_ahead": "0",
+    },
     "strategy": {
         "edge_gain": "10",
         "shrink_to_mid": "0",

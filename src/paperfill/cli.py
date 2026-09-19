@@ -381,6 +381,8 @@ def _run_config_from(settings: Any, kill_file: Path | None) -> Any:
         kill_file=kill_file,
         vol_sample_seconds=float(settings.get("model", "vol_sample_seconds")),
         vol_halflife_seconds=float(settings.get("model", "vol_halflife_seconds")),
+        queue_model=bool(settings.get("model", "queue_model")),
+        assumed_queue_ahead=settings.decimal("model", "assumed_queue_ahead"),
     )
 
 

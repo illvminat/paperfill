@@ -66,6 +66,7 @@ class Order:
     status: OrderStatus = OrderStatus.OPEN
     reason: str | None = None
     crossed: bool = False  # the book currently sits through this order's price
+    ahead: Decimal = ZERO  # resting size ahead of this order at its price (queue model)
 
     def __post_init__(self) -> None:
         self.remaining = self.size
@@ -93,6 +94,8 @@ class MarketParams:
     fees: FeeSchedule
     tick_size: Decimal
     min_order_size: Decimal
+    queue_model: bool = True  # resting orders queue behind the size already at their price
+    assumed_queue_ahead: Decimal = ZERO  # queue ahead when no book is known (tape-only replay)
 
 
 class PaperExecutor:
@@ -121,7 +124,13 @@ class PaperExecutor:
         return self._match_resting_against_book(book.token_id)
 
     def on_trade_print(self, print_: TradePrint) -> list[Fill]:
-        """Replay mode: a print through a resting order's price fills it (maker)."""
+        """Replay mode: prints fill resting orders as makers.
+
+        A print *through* the order's price clears the level, so the order fills up to
+        the print size. A print *at* the order's price first consumes the queue ahead of
+        the order (`Order.ahead`) and only the remainder reaches it. Without the queue
+        model, prints at the price never fill (queue unknown, assume the worst).
+        """
         fills: list[Fill] = []
         available = print_.size
         for order in self._open_orders(print_.token_id):
@@ -130,7 +139,16 @@ class PaperExecutor:
             through = (
                 print_.price < order.price if order.side == "BUY" else print_.price > order.price
             )
-            if not through:
+            at_price = print_.price == order.price
+            if through:
+                order.ahead = ZERO
+            elif at_price and self.params.queue_model:
+                consumed = min(available, order.ahead)
+                order.ahead -= consumed
+                available -= consumed
+                if available <= ZERO:
+                    continue
+            else:
                 continue
             size = min(order.remaining, available)
             available -= size
@@ -210,6 +228,12 @@ class PaperExecutor:
                 "FAK: remainder cancelled",
                 ZERO,
             )
+        if order.status is OrderStatus.OPEN and self.params.queue_model:
+            if book is not None:
+                side_levels = book.bids if order.side == "BUY" else book.asks
+                order.ahead = side_levels.get(order.price, ZERO)
+            else:
+                order.ahead = self.params.assumed_queue_ahead
         return order, fills
 
     def cancel(self, order_id: str, reason: str = "cancelled by strategy") -> Order:
@@ -276,6 +300,11 @@ class PaperExecutor:
         book = self.books[token_id]
         fills: list[Fill] = []
         for order in self._open_orders(token_id):
+            if self.params.queue_model:
+                same = book.bids if order.side == "BUY" else book.asks
+                order.ahead = min(
+                    order.ahead, same.get(order.price, ZERO)
+                )  # can't be more than the level
             opposite = book.best_ask if order.side == "BUY" else book.best_bid
             if opposite is None:
                 order.crossed = False
@@ -291,7 +320,14 @@ class PaperExecutor:
             if order.crossed:
                 continue
             order.crossed = True
-            size = min(order.remaining, opposite.size)
+            available = opposite.size
+            if self.params.queue_model:
+                consumed = min(available, order.ahead)
+                order.ahead -= consumed
+                available -= consumed
+            size = min(order.remaining, available)
+            if size <= ZERO:
+                continue
             fills.append(self._fill(order, order.price, size, "maker", book.ts or self.clock()))
         return fills
 

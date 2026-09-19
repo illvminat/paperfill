@@ -341,9 +341,8 @@ def test_price_change_fill_is_stamped_with_the_event_time(gamma_market_raw):
     result = runner.run(
         [
             BookEvent(T0, snap),  # strategy bids 0.60 (joins the best bid)
-            PriceChangeEvent(
-                later, up, {"side": "SELL", "price": "0.59", "size": "3"}
-            ),  # ask through our bid
+            # 100 shares queue ahead of our bid at 0.60; a crossing of 103 leaves 3 for us
+            PriceChangeEvent(later, [(up, {"side": "SELL", "price": "0.59", "size": "103"})]),
         ]
     )
     assert len(result.fills) == 1 and result.fills[0].ts == later

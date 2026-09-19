@@ -98,10 +98,14 @@ def scan_recording(path: Path, market: MarketInfo, *, keep_history: bool = False
         if isinstance(e, BookEvent):
             books[e.book.token_id] = e.book
         elif isinstance(e, PriceChangeEvent):
-            b = books.get(e.token_id)
-            if b is None:
+            touched = False
+            for token, change in e.changes:
+                b = books.get(token)
+                if b is not None:
+                    b.apply_price_change(change)
+                    touched = True
+            if not touched:
                 continue
-            b.apply_price_change(e.change)
         else:
             continue
         up, down = books.get(market.yes_token), books.get(market.no_token)

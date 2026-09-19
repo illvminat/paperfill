@@ -40,9 +40,22 @@ class BookEvent:
 
 @dataclass(frozen=True, slots=True)
 class PriceChangeEvent:
+    """One `price_change` message: every level change it carries, applied together.
+
+    A message may touch several levels and both tokens; the book states between its
+    changes never existed on the exchange, so nothing is evaluated in between.
+    """
+
     ts: datetime
-    token_id: str
-    change: dict[str, Any]
+    changes: list[tuple[str, dict[str, Any]]]  # (token_id, change)
+
+    @property
+    def tokens(self) -> list[str]:
+        seen: list[str] = []
+        for token, _ in self.changes:
+            if token not in seen:
+                seen.append(token)
+        return seen
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,8 +111,13 @@ def events_from_recording(path: Path) -> Iterator[Event]:
             if kind == "book":
                 yield BookEvent(ts, OrderBook.from_snapshot(p))
             elif kind == "price_change":
-                for ch in p["price_changes"]:
-                    yield PriceChangeEvent(ts, str(ch.get("token_id") or ch.get("asset_id")), ch)
+                yield PriceChangeEvent(
+                    ts,
+                    [
+                        (str(ch.get("token_id") or ch.get("asset_id")), ch)
+                        for ch in p["price_changes"]
+                    ],
+                )
             elif kind == "last_trade_price":
                 yield TradePrint(
                     ts=ts,
@@ -129,6 +147,8 @@ class RunConfig:
     mark_every: timedelta = timedelta(seconds=5)
     kill_file: Path | None = None
     vol_sample_seconds: float = 0.0  # fair-value model: return sampling interval (0 = every print)
+    queue_model: bool = True  # resting orders queue behind the size already at their price
+    assumed_queue_ahead: Decimal = Decimal("0")  # when no book is known (tape-only replay)
     vol_halflife_seconds: float = 60.0
 
 
@@ -157,7 +177,13 @@ class Runner:
         self.mode = mode
         self.now = datetime.now(UTC)
         self.executor = PaperExecutor(
-            MarketParams(market.fees, market.tick_size, market.min_order_size),
+            MarketParams(
+                market.fees,
+                market.tick_size,
+                market.min_order_size,
+                queue_model=config.queue_model,
+                assumed_queue_ahead=config.assumed_queue_ahead,
+            ),
             clock=lambda: self.now,
         )
         self.portfolio = Portfolio(cash=config.capital)
@@ -345,11 +371,15 @@ class Runner:
             self._apply_fills(self.executor.on_book(event.book))
         elif isinstance(event, PriceChangeEvent):
             self.now = event.ts
-            book = self.executor.books.get(event.token_id)
-            if book is not None:
-                book.apply_price_change(event.change)
-                book.ts = event.ts  # fills found now are stamped now, not at the last snapshot
-                self._apply_fills(self.executor.on_book(book))
+            for token, change in event.changes:
+                book = self.executor.books.get(token)
+                if book is not None:
+                    book.apply_price_change(change)
+                    book.ts = event.ts  # fills found now are stamped now, not at the last snapshot
+            for token in event.tokens:
+                book = self.executor.books.get(token)
+                if book is not None:
+                    self._apply_fills(self.executor.on_book(book))
         elif isinstance(event, PriceEvent):
             self.now = event.ts
             if self.fair is not None:

@@ -105,3 +105,111 @@ def test_polymarket_venue_conforms_to_the_protocol(gamma_market_raw):
     assert m is not None and m.asset == "BTC"
     found = venue.discover(asset="BTC", window="5m", limit=5)
     assert [x.slug for x in found] == [gamma_market_raw["slug"]]
+
+
+def test_pairs_cli_and_mcp_tool_over_a_fake_directory(capsys, tmp_path, gamma_market_raw):
+    import json
+
+    from tests.test_cli import _fake_market_source, main
+
+    m = from_gamma_json(gamma_market_raw)
+    recdir = tmp_path / "rec"
+    recdir.mkdir()
+    rec = recdir / f"{m.condition_id}-20260918T215000Z.jsonl.gz"
+    sink = JsonlSink(rec)
+    t = lambda s: (m.window_start + timedelta(seconds=s)).isoformat()  # noqa: E731
+    for token, ask in ((m.yes_token, "0.45"), (m.no_token, "0.50")):
+        sink.write({"kind": "book", "recv_ts": t(0), "payload": {"token_id": token, "bids": [],
+                    "asks": [{"price": ask, "size": "5"}]}})  # fmt: skip
+    sink.write({"kind": "stop", "recv_ts": t(5)})
+    sink.close()
+    Source = _fake_market_source(gamma_market_raw)
+    out = tmp_path / "out"
+    assert (
+        main(["pairs", "--recordings", str(recdir), "--out", str(out)], source_factory=Source) == 0
+    )
+    text = capsys.readouterr().out
+    assert "| windows_with_profitable_pair | 1 |" in text
+    body = json.loads((out / "pairs.json").read_text())
+    assert body["windows"][0]["best_net_per_pair"] == "0.01517"
+    assert main(["pairs", "--recordings", str(tmp_path / "empty")], source_factory=Source) == 1
+
+    import pytest
+
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from mcp import Client
+
+    from paperfill.mcp_server import create_server
+
+    server = create_server(data_dir=tmp_path, source_factory=Source)
+
+    async def go(args):
+        async with Client(server) as c:
+            return await c.call_tool("scan_pairs", args)
+
+    r = asyncio.run(go({"recordings_dir": str(recdir)}))
+    assert not r.is_error and r.structured_content["summary"]["episodes"] == 1
+    assert asyncio.run(go({"recordings_dir": str(tmp_path / "none")})).is_error
+
+
+def test_polymarket_venue_book_trades_and_record_with_fakes(
+    tmp_path, gamma_market_raw, monkeypatch
+):
+    from polymarket.models.data.activity import Trade as SdkTrade
+    from polymarket.models.gamma.market import Market as SdkMarket
+
+    m = from_gamma_json(gamma_market_raw)
+
+    class Book:
+        def model_dump(self, mode="json"):
+            return {"token_id": m.yes_token, "bids": [{"price": "0.5", "size": "1"}], "asks": []}
+
+    class Page:
+        def __init__(self, items, has_more=False):
+            self.items, self.has_more, self.next_cursor = tuple(items), has_more, None
+
+    class Paginator:
+        def __init__(self, items):
+            self._items = items
+
+        def first_page(self):
+            return Page(self._items)
+
+        def __iter__(self):
+            yield Page(self._items)
+
+    row = {"proxy_wallet": "0x" + "ab" * 20, "side": "BUY", "token_id": m.yes_token,
+           "condition_id": m.condition_id, "size": "5", "price": "0.6", "timestamp": 1000,
+           "transaction_hash": "0x" + "cd" * 32}  # fmt: skip
+
+    class Client:
+        def get_order_book(self, token_id):
+            return Book()
+
+        def list_trades(self, **params):
+            return Paginator((SdkTrade.model_validate(row),))
+
+        def list_markets(self, **params):
+            return Paginator((SdkMarket.model_validate(gamma_market_raw),))
+
+        def close(self):
+            pass
+
+    venue = PolymarketVenue(client_factory=Client)
+    assert venue.order_book(m.yes_token).best_bid.price == D("0.5")
+    assert [t.price for t in venue.trades(m.condition_id)] == [D("0.6")]
+
+    import paperfill.venues as venues_mod
+
+    async def fake_record(*args, **kwargs):
+        args[2].write({"kind": "start", "recv_ts": "2026-09-19T00:00:00+00:00"})
+        return 1
+
+    monkeypatch.setattr("paperfill.recorder.record_market", fake_record)
+    n = venue.record(m, tmp_path / "r.jsonl.gz", seconds=1, with_prices=True)
+    assert n == 1 and (tmp_path / "r.jsonl.gz").exists()
+    assert (
+        venues_mod.first_event_time(tmp_path / "r.jsonl.gz") is None
+    )  # start records are not events
