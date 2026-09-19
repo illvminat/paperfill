@@ -57,6 +57,7 @@ class Metrics:
     gaps: int = 0
     per_token: dict[str, dict[str, Any]] = field(default_factory=dict)
     lean_buckets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    engine_mismatch: list[str] = field(default_factory=list)  # run_end vs recomputation
 
     def to_json(self) -> dict[str, Any]:
         out = {}
@@ -152,6 +153,18 @@ def compute(entries: list[Entry]) -> Metrics:
         m.max_drawdown_pct = (dd / peak * 100).quantize(Q) if peak else ZERO
         if not m.settled:
             m.final_equity = equity_curve[-1]
+    # independence check: fees and, once settled, P&L are recomputed from the fills
+    fees_from_fills = sum((s["fees"] for s in token_stats.values()), ZERO)
+    if fees_from_fills != m.fees:
+        m.engine_mismatch.append(f"fees: run_end {m.fees} vs fills {fees_from_fills}")
+    if m.settled and payouts:
+        pnl_from_fills = sum(
+            (s["shares"] * payouts.get(t, ZERO) - s["cost"] for t, s in token_stats.items()), ZERO
+        )
+        if pnl_from_fills != m.realized_pnl:
+            m.engine_mismatch.append(
+                f"realized P&L: run_end {m.realized_pnl} vs fills+settle {pnl_from_fills}"
+            )
     filled_tokens = [t for t, s in token_stats.items() if s["fills"] > 0]
     m.both_sides = len(filled_tokens) >= 2
     for token, s in token_stats.items():
@@ -176,7 +189,9 @@ def compute(entries: list[Entry]) -> Metrics:
             "fills": int(s["fills"]),
             "shares": str(s["shares"]),
             "avg_price": str((s["cost"] / s["shares"]).quantize(Q)) if s["shares"] else None,
-            "win_rate": str((won / s["shares"]).quantize(Q)) if payouts and s["shares"] else None,
+            "payout_share": (
+                str((won / s["shares"]).quantize(Q)) if payouts and s["shares"] else None
+            ),
         }
     return m
 
@@ -240,7 +255,7 @@ def to_markdown(m: Metrics) -> str:
         "",
         "## Fills by conviction bucket (strategy-defined lean)",
         "",
-        "| Bucket | Fills | Shares | Avg price | Win rate |",
+        "| Bucket | Fills | Shares | Avg price | Payout share |",
         "|---|---|---|---|---|",
     ]
     for b in ("strong_positive", "positive", "flat", "negative", "strong_negative"):
@@ -248,15 +263,20 @@ def to_markdown(m: Metrics) -> str:
         if s:
             lines.append(
                 f"| {b} | {s['fills']} | {s['shares']} | {s['avg_price']} "
-                f"| {s['win_rate'] or '—'} |"
+                f"| {s['payout_share'] or '—'} |"
             )
     lines += [
         "",
-        "Fill model is conservative (see `execution.py`). A P&L here is a property of the",
+        *(
+            [f"**Engine mismatch:** {'; '.join(m.engine_mismatch)}", ""]
+            if m.engine_mismatch
+            else ["Fees and settled P&L recomputed from the fills agree with the engine.", ""]
+        ),
+        "Payout share: share-weighted fraction of a bucket's shares that paid 1, from a",
+        "single resolution. Fill model is conservative on price (see `execution.py`). "
+        "A P&L here is a property of the",
         "strategy on this tape, not a forecast. Losses are reported exactly like gains.",
-        "Win rates by lean bucket come from a single market's resolution: one observation,",
-        "not a measure of skill. Buy fees are part of the cost basis, so realized P&L is",
-        "after all fees.",
+        "Buy fees are part of the cost basis, so realized P&L is after all fees.",
         "",
     ]
     return "\n".join(lines)

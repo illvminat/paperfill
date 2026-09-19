@@ -190,3 +190,28 @@ def test_price_events_feed_fair_value_and_are_journaled(gamma_market_raw):
     assert fv.data["start_price"] == "80000" and fv.data["start_source"] == "twap-at-start"
     submitted = [e for e in journal.entries if e.kind == "order_submitted"]
     assert all(D(e.data["lean"]) > 0 for e in submitted)  # fair value above the 0.50 print
+
+
+def test_report_flags_engine_mismatch_from_a_forged_run_end(gamma_market_raw, tmp_path):
+    m = market(gamma_market_raw, resolved=True)
+    journal = Journal.open(tmp_path / "journal.jsonl", clock=clock())
+    strategy = TwoSidedQuoter(size=D("5"), requote_every=timedelta(seconds=5), quote_ttl=None)
+    Runner(m, strategy, journal, RunConfig(capital=D("100")), mode="replay").run(
+        _tape(m), payouts=m.payouts
+    )
+    journal.close()
+    entries = journal.entries
+    assert compute(entries).engine_mismatch == []
+    # forge the run_end totals: the report must notice, the chain aside
+    forged = [
+        e
+        if e.kind != "run_end"
+        else type(e)(
+            e.seq, e.ts, e.kind, {**e.data, "realized_pnl": "9.99", "fees": "1"}, e.prev, e.hash
+        )
+        for e in entries
+    ]
+    mm = compute(forged)
+    assert any("fees" in x for x in mm.engine_mismatch)
+    assert any("realized P&L" in x for x in mm.engine_mismatch)
+    assert "Engine mismatch" in to_markdown(mm)

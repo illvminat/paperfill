@@ -131,3 +131,22 @@ def test_summarize_handles_unsettled_only():
     r = WindowResult("x", "q", False, Metrics())
     s = summarize([r])
     assert s["settled"] == 0 and s["mean_pnl"] is None and s["windows"] == 1
+
+
+def test_summary_statistics_and_halted_count():
+    from paperfill.batch import _bootstrap_ci
+
+    def wr(pnl, halted=None):
+        m = Metrics()
+        m.realized_pnl, m.settled, m.halted = D(pnl), True, halted
+        return WindowResult("x", "q", True, m)
+
+    rs = [wr("1"), wr("-3", "daily loss limit"), wr("2"), wr("-1"), wr("4"), wr("-2")]
+    s = summarize(rs)
+    assert s["halted"] == 1 and s["settled"] == 6 and s["mean_pnl"] == "0.1667"
+    assert s["stdev"] == "2.6394" and abs(s["t_stat"] - 0.15) < 0.01
+    lo, hi = (D(x) for x in s["mean_ci95"])
+    assert lo < D("0.1667") < hi
+    assert _bootstrap_ci([D("1")] * 5) == (D("1.0000"), D("1.0000"))
+    one = summarize([wr("5")])
+    assert one["mean_ci95"] is None and one["t_stat"] is None and one["stdev"] is None

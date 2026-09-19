@@ -72,7 +72,9 @@ Research over many windows: `collect` records consecutive windows for hours,
 `batch --workers N` runs one strategy over every recording in parallel (results are
 byte-identical to a sequential run), `calibrate` scores the fair-value model against
 the book mid (Brier, reliability), `sweep` tries a parameter grid on earlier windows
-and reports the chosen combination on later ones.
+and reports the chosen combination on later ones. Batch summaries include every window
+(halted runs are settled and counted), a bootstrap 95% interval of the mean and a
+t-statistic; windows are consecutive, so both understate the uncertainty.
 
 Files carry a schema version (`start` record of a recording, `run_start` entry of a
 journal); readers refuse newer schemas instead of misreading them. `record --max-mb`
@@ -101,13 +103,15 @@ and `docs/decisions/0002-model-ispolneniya.md`:
 
 - An order that crosses the book is filled level by level as a **taker** and pays
   the taker fee `C × rate × (p × (1 − p)) ^ exponent` from the market's `feeSchedule`,
-  rounded to 5 decimals (fees verified against the 82 example values in the official
+  rounded to 5 decimals (fees verified against the 83 example values in the official
   fee tables).
 - A resting order is filled as a **maker** (no fee; rebate reported separately as an
   upper-bound estimate) only when the market trades *through* its price: a print
   strictly better than the order price in replay, or the opposite side of the book
-  crossing it on a recording. Prints exactly at the order price are not fills,
-  because queue position is unknown.
+  crossing it on a recording, once per crossing. Prints exactly at the order price
+  are not fills, because queue position is unknown. **Conservative on price, not on
+  size:** when a fill happens, its size is the whole print or the whole crossing
+  level, with no queue ahead of the order. On thin books this overstates fills.
 - Positions are held long-only and settled at the market's resolution payouts
   (1 or 0 per share) when the market is resolved. Buy fees are part of the cost
   basis, so "realized P&L after fees" is after all fees on both legs.

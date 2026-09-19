@@ -123,20 +123,53 @@ def split_by_time(
     return ordered[:k], ordered[k:]
 
 
+def _bootstrap_ci(
+    values: list[Decimal], *, n: int = 2000, seed: int = 7
+) -> tuple[Decimal, Decimal]:
+    """95% percentile bootstrap of the mean; deterministic seed so reports reproduce."""
+    import random
+
+    rng = random.Random(seed)
+    xs = [float(v) for v in values]
+    means = sorted(sum(rng.choices(xs, k=len(xs))) / len(xs) for _ in range(n))
+    lo, hi = means[int(0.025 * n)], means[int(0.975 * n) - 1]
+    return Decimal(f"{lo:.4f}"), Decimal(f"{hi:.4f}")
+
+
 def summarize(results: list[WindowResult]) -> dict[str, Any]:
+    """Settled windows carry realized P&L; unsettled ones are listed, not averaged.
+
+    Halted windows are settled like any other (a breaker halt is an outcome), so they
+    are inside every figure; their count is shown so nobody has to guess.
+    """
+    import math
+
     settled = [r for r in results if r.settled]
     pnls = [r.metrics.realized_pnl for r in settled]
     wins = sum(1 for p in pnls if p > ZERO)
     total = sum(pnls, ZERO)
     fees = sum((r.metrics.fees for r in settled), ZERO)
+    mean = (total / len(pnls)) if pnls else None
+    if len(pnls) >= 2:
+        fm = float(mean)
+        var = sum((float(p) - fm) ** 2 for p in pnls) / (len(pnls) - 1)
+        sd = math.sqrt(var)
+        t_stat = fm / (sd / math.sqrt(len(pnls))) if sd > 0 else None
+        lo, hi = _bootstrap_ci(pnls)
+    else:
+        sd, t_stat, lo, hi = None, None, None, None
     return {
         "windows": len(results),
         "settled": len(settled),
         "unsettled": len(results) - len(settled),
+        "halted": sum(1 for r in results if r.metrics.halted),
         "winning_windows": wins,
         "losing_windows": sum(1 for p in pnls if p < ZERO),
         "total_pnl": str(total),
-        "mean_pnl": str((total / len(pnls)).quantize(Decimal("0.0001"))) if pnls else None,
+        "mean_pnl": str(mean.quantize(Decimal("0.0001"))) if mean is not None else None,
+        "mean_ci95": [str(lo), str(hi)] if lo is not None else None,
+        "t_stat": round(t_stat, 2) if t_stat is not None else None,
+        "stdev": f"{sd:.4f}" if sd is not None else None,
         "worst_window": str(min(pnls)) if pnls else None,
         "best_window": str(max(pnls)) if pnls else None,
         "total_fees": str(fees),
@@ -162,9 +195,10 @@ def to_markdown(results: list[WindowResult], summary: dict[str, Any], strategy: 
         lines.append(f"| {k} | {v} |")
     lines += [
         "",
-        "One strategy, fixed parameters, every window on disk. Windows are not independent",
-        "(same asset, same hours); a mean over a few dozen of them is a description of this",
-        "sample, not an expectation.",
+        "One strategy, fixed parameters, every window on disk. Halted windows are settled",
+        "and included. `mean_ci95` is a percentile bootstrap of the mean; `t_stat` is the",
+        "mean over its standard error. Windows are consecutive and not independent, so",
+        "both understate the uncertainty; treat a |t| under 2 as noise.",
         "",
     ]
     return "\n".join(lines)

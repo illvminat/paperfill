@@ -34,8 +34,8 @@ harness produced these answers in minutes and without money; that is its purpose
 
 - One executor, the paper one. Live trading is out of scope by decision, not by omission.
 - No latency or queue model: the harness tests logic against a tape, not speed.
-- Fills exactly at a resting order's price are not counted (queue position unknown).
-- Windows are consecutive and not independent; means are descriptions, not expectations.
+- Fills exactly at a resting order's price are not counted (queue position unknown); a fill that does happen takes the whole print or crossing level, which is optimistic on size.
+- Windows are consecutive and not independent; means are descriptions, not expectations. Batch summaries carry a bootstrap interval and a t-statistic, and count halted windows, which are settled and included.
 - Resume restores fills and progress from the journal, not resting orders.
 - The journal's hash chain is unkeyed: it detects edits, not a full rewrite.
 
