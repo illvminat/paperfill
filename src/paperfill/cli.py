@@ -120,6 +120,21 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--capital", type=_decimal, default=Decimal("100"))
     batch.add_argument("--size", type=_decimal, default=Decimal("5"))
     batch.add_argument("--min-edge", type=_decimal, default=Decimal("0.02"))
+    batch.add_argument("--workers", type=int, default=1, help="parallel processes")
+
+    sweep = sub.add_parser("sweep", help="parameter grid on earlier windows, judged on later ones")
+    sweep.add_argument("--recordings", type=Path, default=Path("data/record"))
+    sweep.add_argument("--out", type=Path, default=Path("data/sweep"))
+    sweep.add_argument("--strategy", choices=["two-sided", "fair-value"], default="fair-value")
+    sweep.add_argument("--size", default="5")
+    sweep.add_argument("--train-share", type=float, default=0.6)
+    sweep.add_argument("--workers", type=int, default=1)
+    sweep.add_argument(
+        "--grid",
+        type=Path,
+        default=None,
+        help="JSON file {param: [values]}; default grid otherwise",
+    )
 
     cal = sub.add_parser("calibrate", help="calibrate the fair-value model across recordings")
     cal.add_argument("--recordings", type=Path, default=Path("data/record"))
@@ -273,13 +288,15 @@ def _load_market(source_factory: Callable[[], Any], condition_id: str) -> Any:
 
 
 def _make_strategy(name: str, size: Decimal, min_edge: Decimal) -> Callable[[], Any]:
+    from functools import partial
+
     from paperfill.strategy import FairValueQuoter, TakerProbe, TwoSidedQuoter
 
     if name == "fair-value":
-        return lambda: FairValueQuoter(size=size, min_edge=min_edge)
+        return partial(FairValueQuoter, size=size, min_edge=min_edge)
     if name == "taker-probe":
-        return lambda: TakerProbe(size=size)
-    return lambda: TwoSidedQuoter(size=size)
+        return partial(TakerProbe, size=size)
+    return partial(TwoSidedQuoter, size=size)
 
 
 def _cmd_collect(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
@@ -301,18 +318,56 @@ def _cmd_collect(args: argparse.Namespace, source_factory: Callable[[], Any]) ->
     return 0 if n else 1
 
 
+def _load_markets(source_factory: Callable[[], Any], recordings: list[Path]) -> dict[str, Any]:
+    """Resolve every recording's market once, up front (picklable dict for workers)."""
+    from paperfill.batch import condition_of
+
+    out: dict[str, Any] = {}
+    for p in recordings:
+        cid = condition_of(p)
+        if cid and cid not in out:
+            m = _load_market(source_factory, cid)
+            if m is not None:
+                out[cid] = m
+    return out
+
+
+def _cmd_sweep(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.runner import RunConfig
+    from paperfill.sweep import DEFAULT_GRIDS, sweep, to_markdown
+
+    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    grid = json.loads(args.grid.read_text()) if args.grid else DEFAULT_GRIDS[args.strategy]
+    markets = _load_markets(source_factory, recs)
+    result = sweep(
+        recs,
+        markets.get,
+        strategy=args.strategy,
+        grid=grid,
+        size=args.size,
+        base_config=RunConfig(),
+        out_dir=args.out / args.strategy,
+        train_share=args.train_share,
+        workers=args.workers,
+    )
+    print(to_markdown(result))
+    return 0
+
+
 def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.batch import run_batch, summarize, to_markdown
     from paperfill.runner import RunConfig
 
     recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
     out = args.out / args.strategy
+    markets = _load_markets(source_factory, recs)
     results = run_batch(
         recs,
-        lambda cid: _load_market(source_factory, cid),
+        markets.get,
         _make_strategy(args.strategy, args.size, args.min_edge),
         config=RunConfig(capital=args.capital),
         out_dir=out,
+        workers=args.workers,
     )
     summary = summarize(results)
     md = to_markdown(results, summary, args.strategy)
@@ -463,6 +518,8 @@ def main(
         return _cmd_kill(args)
     if args.command == "calibrate":
         return _cmd_calibrate(args, source_factory)
+    if args.command == "sweep":
+        return _cmd_sweep(args, source_factory)
     if args.command == "collect":
         return _cmd_collect(args, source_factory)
     if args.command == "batch":

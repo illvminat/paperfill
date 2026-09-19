@@ -121,6 +121,8 @@ class RunConfig:
     limits: RiskLimits = field(default_factory=RiskLimits)
     mark_every: timedelta = timedelta(seconds=5)
     kill_file: Path | None = None
+    vol_sample_seconds: float = 0.0  # fair-value model: return sampling interval (0 = every print)
+    vol_halflife_seconds: float = 60.0
 
 
 @dataclass(slots=True)
@@ -157,7 +159,12 @@ class Runner:
         }
         self.last_prices: dict[str, Decimal] = {}
         self.fair: FairValue | None = (
-            FairValue(market.window_start, market.end)
+            FairValue(
+                market.window_start,
+                market.end,
+                halflife_seconds=config.vol_halflife_seconds,
+                vol_sample_seconds=config.vol_sample_seconds,
+            )
             if market.window_start is not None and market.end is not None
             else None
         )

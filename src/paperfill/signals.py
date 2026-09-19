@@ -33,6 +33,7 @@ class FairValue:
     window_end: datetime
     halflife_seconds: float = 60.0
     min_sigma: float = 1e-5  # per second; floors the estimate before any data
+    vol_sample_seconds: float = 0.0  # >0: returns are measured over at least this many seconds
     start_price: Decimal | None = None
     start_source: str | None = None  # "twap-at-start" or "first-seen"
     last_ts: datetime | None = None
@@ -44,6 +45,8 @@ class FairValue:
         """Feed a spot print (Binance) to update the volatility estimate."""
         if self.last_price is not None and self.last_ts is not None:
             dt = (ts - self.last_ts).total_seconds()
+            if 0 < dt < self.vol_sample_seconds:
+                return  # wait until the sampling interval has elapsed
             if dt > 0:
                 r = math.log(float(price) / float(self.last_price))
                 per_second = (r * r) / dt

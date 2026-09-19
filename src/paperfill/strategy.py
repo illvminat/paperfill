@@ -160,18 +160,30 @@ class FairValueQuoter:
     requote_every: timedelta = timedelta(seconds=5)
     max_inventory: Decimal = Decimal("50")
     quote_ttl: timedelta | None = timedelta(seconds=15)
+    shrink_to_mid: Decimal = Decimal("0")  # 0 = pure model, 1 = pure book mid
+    stop_after: timedelta | None = None  # no new quotes this long after the window start
     name: str = "fair-value-quoter"
     _last_quote_at: datetime | None = None
 
     def on_tick(self, ctx: Context) -> list[Action]:
         if ctx.fair_up is None:
             return []
+        if (
+            self.stop_after is not None
+            and ctx.market.window_start is not None
+            and ctx.now - ctx.market.window_start >= self.stop_after
+        ):
+            return [Cancel(o.id, "past stop_after") for o in ctx.open_orders]
         if self._last_quote_at is not None and ctx.now - self._last_quote_at < self.requote_every:
             return []
         self._last_quote_at = ctx.now
         up, down = ctx.market.yes_token, ctx.market.no_token
         tick = ctx.market.tick_size
-        fair = {up: ctx.fair_up, down: ONE - ctx.fair_up}
+        fair_up = ctx.fair_up
+        mid_up = ctx.reference_price(up)
+        if self.shrink_to_mid > ZERO and mid_up is not None:
+            fair_up = (ONE - self.shrink_to_mid) * fair_up + self.shrink_to_mid * mid_up
+        fair = {up: fair_up, down: ONE - fair_up}
         actions: list[Action] = [Cancel(o.id, "requote") for o in ctx.open_orders]
         bids: dict[str, Decimal] = {}
         edges: dict[str, Decimal] = {}

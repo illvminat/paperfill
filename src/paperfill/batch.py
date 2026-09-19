@@ -38,6 +38,32 @@ class WindowResult:
     metrics: Metrics
 
 
+def run_window(
+    path: Path,
+    market: MarketInfo,
+    make_strategy: Callable[[], Any],
+    config: RunConfig,
+    out_dir: Path,
+) -> WindowResult:
+    """One recording, one journal, one report; safe to call from a worker process."""
+    payouts = market.payouts if recording_covers_resolution(path, market.end) else None
+    run_dir = out_dir / path.name.split(".")[0]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    journal_path = run_dir / "journal.jsonl"
+    if journal_path.exists():
+        journal_path.unlink()  # a rerun replaces the previous journal of this window
+    journal = Journal.open(journal_path)
+    try:
+        Runner(market, make_strategy(), journal, config, mode="record").run(
+            events_from_recording(path), payouts=payouts
+        )
+    finally:
+        journal.close()
+    metrics = compute(journal.entries)
+    (run_dir / "report.json").write_text(json.dumps(metrics.to_json(), indent=2, sort_keys=True))
+    return WindowResult(path.name, market.question, metrics.settled, metrics)
+
+
 def run_batch(
     recordings: Iterable[Path],
     load_market: Callable[[str], MarketInfo | None],
@@ -46,8 +72,14 @@ def run_batch(
     config: RunConfig,
     out_dir: Path,
     log: Callable[[str], None] = print,
+    workers: int = 1,
 ) -> list[WindowResult]:
-    results: list[WindowResult] = []
+    """Run every recording; with `workers > 1` windows run in separate processes.
+
+    `make_strategy` and `config` must be picklable for that: module-level factories or
+    `functools.partial` over module-level classes, never lambdas.
+    """
+    jobs: list[tuple[Path, MarketInfo]] = []
     for path in sorted(recordings):
         cid = condition_of(path)
         if cid is None:
@@ -57,27 +89,38 @@ def run_batch(
         if market is None:
             log(f"skip {path.name}: market not found")
             continue
-        payouts = market.payouts if recording_covers_resolution(path, market.end) else None
-        run_dir = out_dir / path.name.split(".")[0]
-        run_dir.mkdir(parents=True, exist_ok=True)
-        journal = Journal.open(run_dir / "journal.jsonl")
-        strategy = make_strategy()
-        try:
-            Runner(market, strategy, journal, config, mode="record").run(
-                events_from_recording(path), payouts=payouts
-            )
-        finally:
-            journal.close()
-        metrics = compute(journal.entries)
-        (run_dir / "report.json").write_text(
-            json.dumps(metrics.to_json(), indent=2, sort_keys=True)
-        )
-        results.append(WindowResult(path.name, market.question, metrics.settled, metrics))
-        log(
-            f"{market.question}: fills {metrics.fills}, fees {metrics.fees}, "
-            f"P&L {metrics.realized_pnl if metrics.settled else 'unsettled'}"
-        )
+        jobs.append((path, market))
+    results: list[WindowResult] = []
+    if workers <= 1:
+        for path, market in jobs:
+            results.append(run_window(path, market, make_strategy, config, out_dir))
+            log(_line(results[-1]))
+        return results
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(run_window, p, m, make_strategy, config, out_dir) for p, m in jobs]
+        for fut in futures:
+            results.append(fut.result())
+            log(_line(results[-1]))
     return results
+
+
+def _line(r: WindowResult) -> str:
+    m = r.metrics
+    return (
+        f"{r.question}: fills {m.fills}, fees {m.fees}, "
+        f"P&L {m.realized_pnl if r.settled else 'unsettled'}"
+    )
+
+
+def split_by_time(
+    recordings: Iterable[Path], train_share: float = 0.6
+) -> tuple[list[Path], list[Path]]:
+    """Earlier windows train, later windows test; never the other way round."""
+    ordered = sorted(recordings, key=lambda p: p.name.split("-")[-1])
+    k = round(len(ordered) * train_share)
+    return ordered[:k], ordered[k:]
 
 
 def summarize(results: list[WindowResult]) -> dict[str, Any]:
