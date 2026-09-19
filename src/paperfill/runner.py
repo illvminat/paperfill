@@ -467,7 +467,7 @@ class Runner:
         for o in self.executor.cancel_all("run end"):
             self.journal.record("order_cancelled", order_id=o.id, reason=o.reason)
         settled = False
-        if payouts:
+        if payouts and not self.halted:  # a halted run keeps its positions for `run --resume`
             received = self.portfolio.settle(payouts)
             settled = True
             self.journal.record("settle", payouts=payouts, received=received)

@@ -127,8 +127,9 @@ def test_risk_halt_cancels_and_blocks(gamma_market_raw, tmp_path):
         TradePrint(t(12), 2, "SELL", D("0.40"), D("5"), up, "Up"),  # mark drops: equity -0.95
         TradePrint(t(20), 3, "BUY", D("0.41"), D("5"), up, "Up"),
     ]
-    result = runner.run(tape)
+    result = runner.run(tape, payouts={up: D("1"), m.no_token: D("0")})
     assert result.halted and result.halted.startswith("total loss limit")
+    assert not result.settled and runner.portfolio.positions[up].size == D("5")  # kept for resume
     kinds = [e.kind for e in journal.entries]
     assert "risk_halt" in kinds
     assert not any(e.kind == "order_submitted" for e in journal.entries[kinds.index("risk_halt") :])
