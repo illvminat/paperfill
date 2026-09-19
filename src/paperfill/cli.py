@@ -121,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--size", type=_decimal, default=Decimal("5"))
     batch.add_argument("--min-edge", type=_decimal, default=Decimal("0.02"))
 
+    cal = sub.add_parser("calibrate", help="calibrate the fair-value model across recordings")
+    cal.add_argument("--recordings", type=Path, default=Path("data/record"))
+    cal.add_argument("--out", type=Path, default=Path("data/calibration"))
+    cal.add_argument("--offsets", default="30,60,120,180,240", help="seconds after window start")
+
     dash = sub.add_parser("dashboard", help="serve the dashboard of a run directory")
     dash.add_argument("run_dir", type=Path)
     dash.add_argument("--host", default="127.0.0.1")
@@ -318,6 +323,20 @@ def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
     return 0
 
 
+def _cmd_calibrate(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
+    from paperfill.batch import condition_of
+    from paperfill.calibration import run_calibration, save, to_markdown
+
+    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    offsets = [int(x) for x in args.offsets.split(",")]
+    cal, samples = run_calibration(
+        recs, lambda cid: _load_market(source_factory, cid), condition_of, offsets=offsets
+    )
+    save(cal, samples, args.out)
+    print(to_markdown(cal))
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace, source_factory: Callable[[], Any]) -> int:
     from paperfill.history import fetch_trades, history_path, load_trades, replay, save_trades
     from paperfill.journal import Journal
@@ -442,6 +461,8 @@ def main(
         return _cmd_journal_verify(args)
     if args.command == "kill":
         return _cmd_kill(args)
+    if args.command == "calibrate":
+        return _cmd_calibrate(args, source_factory)
     if args.command == "collect":
         return _cmd_collect(args, source_factory)
     if args.command == "batch":
