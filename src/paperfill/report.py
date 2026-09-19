@@ -259,11 +259,11 @@ def to_markdown(m: Metrics) -> str:
         "|---|---|---|---|---|",
     ]
     for b in ("strong_positive", "positive", "flat", "negative", "strong_negative"):
-        s = m.lean_buckets.get(b)
-        if s:
+        bucket = m.lean_buckets.get(b)
+        if bucket:
             lines.append(
-                f"| {b} | {s['fills']} | {s['shares']} | {s['avg_price']} "
-                f"| {s['payout_share'] or '—'} |"
+                f"| {b} | {bucket['fills']} | {bucket['shares']} | {bucket['avg_price']} "
+                f"| {bucket['payout_share'] or '—'} |"
             )
     lines += [
         "",

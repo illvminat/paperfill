@@ -30,6 +30,7 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=1",
   "pytest-cov>=6",
+  "mypy>=1.14",
   "python-multipart>=0.0.20",
   "ruff>=0.13",
 ]
@@ -69,3 +70,9 @@ branch = true
 show_missing = true
 skip_covered = false
 fail_under = 90
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true

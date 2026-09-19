@@ -6,6 +6,7 @@ sync:
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run mypy src/paperfill
 
 fmt:
 	uv run ruff format .

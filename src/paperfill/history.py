@@ -142,7 +142,7 @@ def _normalise(raw: Iterable[Any]) -> list[TradePrint]:
         TradePrint(
             ts=_as_utc(t.timestamp),
             seq=i,
-            side=t.side.value if hasattr(t.side, "value") else str(t.side),
+            side="BUY" if str(getattr(t.side, "value", t.side)).upper() == "BUY" else "SELL",
             price=Decimal(str(t.price)),
             size=Decimal(str(t.size)),
             token_id=str(t.asset_id),

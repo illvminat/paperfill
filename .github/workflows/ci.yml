@@ -29,6 +29,8 @@ jobs:
         run: uv run ruff check .
       - name: Format check
         run: uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy src/paperfill
       - name: Tests with coverage
         run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90 -m "not live"
 

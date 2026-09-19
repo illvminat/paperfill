@@ -150,7 +150,7 @@ def summarize(results: list[WindowResult]) -> dict[str, Any]:
     total = sum(pnls, ZERO)
     fees = sum((r.metrics.fees for r in settled), ZERO)
     mean = (total / len(pnls)) if pnls else None
-    if len(pnls) >= 2:
+    if mean is not None and len(pnls) >= 2:
         fm = float(mean)
         var = sum((float(p) - fm) ** 2 for p in pnls) / (len(pnls) - 1)
         sd = math.sqrt(var)

@@ -181,7 +181,7 @@ class PaperExecutor:
             order.status, order.reason, order.remaining = OrderStatus.REJECTED, reason, ZERO
             return order, []
         book = self.books.get(token_id)
-        crossing = self._crossing_levels(order, book) if book else []
+        crossing = self._crossing_levels(order, book) if book is not None else []
         if order.post_only and crossing:
             order.status, order.reason, order.remaining = (
                 OrderStatus.REJECTED,
@@ -202,6 +202,7 @@ class PaperExecutor:
                 break
             size = min(order.remaining, level_size)
             fills.append(self._fill(order, level_price, size, "taker", now))
+            assert book is not None  # crossing levels only exist with a book
             self._consume(book, order.side, level_price, size)
         if order.remaining > ZERO and order.order_type in (OrderType.FOK, OrderType.FAK):
             order.status, order.reason, order.remaining = (
@@ -276,7 +277,10 @@ class PaperExecutor:
         fills: list[Fill] = []
         for order in self._open_orders(token_id):
             opposite = book.best_ask if order.side == "BUY" else book.best_bid
-            crossed = opposite is not None and (
+            if opposite is None:
+                order.crossed = False
+                continue
+            crossed = (
                 opposite.price < order.price
                 if order.side == "BUY"
                 else opposite.price > order.price
