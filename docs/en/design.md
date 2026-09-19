@@ -18,7 +18,8 @@ places live orders. This page summarises the decisions and measurements recorded
 | Hash-chained journal with schema version, checkpoints and resume | `journal.py`, `runner.py` | tamper test; halt at event 684 → resume → 244,209 events, chain intact |
 | Report computed from the journal only (fill rate, both-sides participation, fees, rebates as an upper bound, realized P&L after all fees, max drawdown sampled at every fill, per-token and per-conviction breakdowns) | `report.py` | per-token P&L adds up to realized P&L |
 | Dashboard with run states, journal tail, token-protected kill button, `/healthz` | `dashboard.py` | FastAPI test client |
-| Research: parallel batch over many windows (byte-identical to sequential), calibration against the book mid (Brier, reliability), parameter sweep with a time split | `batch.py`, `calibration.py`, `sweep.py` | 68-window batch, 76-window calibration, 32-combination sweep |
+| Research: parallel batch over many windows (byte-identical to sequential), calibration against the book mid (Brier, reliability), parameter sweep with a time split, pair scan with duration floors | `batch.py`, `calibration.py`, `sweep.py`, `pairs.py` | 68-window batch, 76-window calibration, 32-combination sweep, 76-window pair scan |
+| Agent access: MCP server over stdio with structured tools and a report resource | `mcp_server.py` | in-process client tests, stdio smoke |
 
 ## What the sample strategies showed
 
@@ -34,7 +35,8 @@ harness produced these answers in minutes and without money; that is its purpose
 
 - One executor, the paper one. Live trading is out of scope by decision, not by omission.
 - No latency or queue model: the harness tests logic against a tape, not speed.
-- Fills exactly at a resting order's price are not counted (queue position unknown); a fill that does happen takes the whole print or crossing level, which is optimistic on size.
+- Resting orders queue behind the size already at their price (queue model, a parameter); the queue is an estimate, not the exchange's.
+- Kalshi is not integrated: its Developer Agreement limits the API to a member's own trading. A venue interface lets a licensed client plug in their own data.
 - Windows are consecutive and not independent; means are descriptions, not expectations. Batch summaries carry a bootstrap interval and a t-statistic, and count halted windows, which are settled and included.
 - Resume restores fills and progress from the journal, not resting orders.
 - The journal's hash chain is unkeyed: it detects edits, not a full rewrite.

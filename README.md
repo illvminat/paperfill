@@ -81,6 +81,16 @@ journal); readers refuse newer schemas instead of misreading them. `record --max
 caps the file size. Logs are JSON lines on stderr (`--log-level`); the dashboard
 answers `/healthz`.
 
+## Pairs and other venues
+
+`paperfill pairs` scans recordings for moments when the best ask of Up plus the best
+ask of Down is below 1 by more than the taker fees on both legs, and reports episodes
+with duration floors of 100 ms and 1 s (shorter ones are flicker between the two
+tokens' feeds). `src/paperfill/venues.py` defines the read-only venue interface a
+client can implement for data they are licensed to use; Polymarket is the only venue
+shipped. A Kalshi adapter is deliberately absent: Kalshi's Developer Agreement limits
+its API to a member's own trading (`docs/decisions/0004-kalshi.md`).
+
 ## As an MCP server
 
 `paperfill mcp` (extra: `uv sync --extra mcp`) exposes the same paper-only tools to an
@@ -117,10 +127,15 @@ and `docs/decisions/0002-model-ispolneniya.md`:
 - A resting order is filled as a **maker** (no fee; rebate reported separately as an
   upper-bound estimate) only when the market trades *through* its price: a print
   strictly better than the order price in replay, or the opposite side of the book
-  crossing it on a recording, once per crossing. Prints exactly at the order price
-  are not fills, because queue position is unknown. **Conservative on price, not on
-  size:** when a fill happens, its size is the whole print or the whole crossing
-  level, with no queue ahead of the order. On thin books this overstates fills.
+  crossing it on a recording, once per crossing. **Queue model** (`[model]
+  queue_model`, default on): a resting order queues behind the size already at its
+  price when it is placed; prints at that price and book crossings consume the queue
+  first and only the remainder reaches the order; a level that shrinks below the queue
+  caps it. On a tape without a book, `assumed_queue_ahead` stands in. With the model
+  off, prints exactly at the order price never fill.
+- `price_change` messages are applied atomically: a message may carry several level
+  changes, and the book is only evaluated between messages, never between the changes
+  of one message (states that never existed on the exchange).
 - Positions are held long-only and settled at the market's resolution payouts
   (1 or 0 per share) when the market is resolved. Buy fees are part of the cost
   basis, so "realized P&L after fees" is after all fees on both legs.
