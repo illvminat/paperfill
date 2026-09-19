@@ -68,8 +68,10 @@ def test_scan_counts_episodes_seconds_and_first_sight_value(tmp_path, gamma_mark
     # 0.07*0.40*0.60 = 0.0168 -> 0.03413; net 0.01587, size 9
     assert scan.best.net_per_pair == D("0.01587") and scan.best.size == D("9")
     assert scan.total_net == D("0.01517") * 4 + D("0.01587") * 9
+    assert scan.episode_seconds == [D("3")] and scan.episodes_at_least(D("1")) == 1
     s = summarize([scan])
     assert s["windows_with_profitable_pair"] == 1 and s["episodes"] == 2
+    assert s["episodes_lasting_1s"] == 1 and s["episodes_lasting_100ms"] == 1
     assert s["best_net_per_pair"] == "0.01587"
     md = to_markdown([scan], s)
     assert "| Summary |" in md and m.question in md

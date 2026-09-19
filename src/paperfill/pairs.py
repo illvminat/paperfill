@@ -55,6 +55,10 @@ class PairScan:
     fee_rate: Decimal = ZERO
     min_gross_seen: Decimal | None = None  # smallest pair cost gap seen (may be negative)
     history: list[PairQuote] = field(default_factory=list)
+    episode_seconds: list[Decimal] = field(default_factory=list)  # duration of each closed episode
+
+    def episodes_at_least(self, seconds: Decimal) -> int:
+        return sum(1 for d in self.episode_seconds if d >= seconds)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -70,6 +74,8 @@ class PairScan:
             "best_at": self.best.ts.isoformat() if self.best else None,
             "total_net_first_sight": str(self.total_net.quantize(Q)),
             "min_gross_seen": str(self.min_gross_seen) if self.min_gross_seen is not None else None,
+            "episodes_100ms": self.episodes_at_least(Decimal("0.1")),
+            "episodes_1s": self.episodes_at_least(Decimal("1")),
         }
 
 
@@ -131,7 +137,9 @@ def scan_recording(path: Path, market: MarketInfo, *, keep_history: bool = False
                 scan.total_net += q.net_per_pair * q.size
         elif in_episode:
             assert episode_started is not None
-            scan.seconds_profitable += Decimal(str((e.ts - episode_started).total_seconds()))
+            lasted = Decimal(str((e.ts - episode_started).total_seconds()))
+            scan.seconds_profitable += lasted
+            scan.episode_seconds.append(lasted)
             in_episode = False
     return scan
 
@@ -142,6 +150,8 @@ def summarize(scans: list[PairScan]) -> dict[str, Any]:
         "windows": len(scans),
         "windows_with_profitable_pair": len(with_pairs),
         "episodes": sum(s.episodes for s in scans),
+        "episodes_lasting_100ms": sum(s.episodes_at_least(Decimal("0.1")) for s in scans),
+        "episodes_lasting_1s": sum(s.episodes_at_least(Decimal("1")) for s in scans),
         "seconds_profitable_total": str(
             sum((s.seconds_profitable for s in scans), ZERO).quantize(Decimal("0.001"))
         ),
@@ -178,6 +188,8 @@ def to_markdown(scans: list[PairScan], summary: dict[str, Any]) -> str:
         "Net at first sight = net per pair x available size when an episode begins: what one",
         "taker sweep would have captured before anyone else. An upper bound, not an expectation:",
         "the recording shows the book after the fact, and the fastest bots see it first.",
+        "Episodes shorter than a round trip to the exchange are flicker between the two tokens'",
+        "feeds, not tradable states; the 100 ms and 1 s counts are the ones to read.",
         "",
     ]
     return "\n".join(lines)
