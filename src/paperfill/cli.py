@@ -318,6 +318,12 @@ def _cmd_collect(args: argparse.Namespace, source_factory: Callable[[], Any]) ->
     return 0 if n else 1
 
 
+def _recordings_in(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return [p for p in directory.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+
+
 def _load_markets(source_factory: Callable[[], Any], recordings: list[Path]) -> dict[str, Any]:
     """Resolve every recording's market once, up front (picklable dict for workers)."""
     from paperfill.batch import condition_of
@@ -336,7 +342,10 @@ def _cmd_sweep(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
     from paperfill.runner import RunConfig
     from paperfill.sweep import DEFAULT_GRIDS, sweep, to_markdown
 
-    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    recs = _recordings_in(args.recordings)
+    if not recs:
+        print(f"no recordings (*.jsonl, *.jsonl.gz) in {args.recordings}")
+        return 1
     grid = json.loads(args.grid.read_text()) if args.grid else DEFAULT_GRIDS[args.strategy]
     markets = _load_markets(source_factory, recs)
     result = sweep(
@@ -358,7 +367,10 @@ def _cmd_batch(args: argparse.Namespace, source_factory: Callable[[], Any]) -> i
     from paperfill.batch import run_batch, summarize, to_markdown
     from paperfill.runner import RunConfig
 
-    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    recs = _recordings_in(args.recordings)
+    if not recs:
+        print(f"no recordings (*.jsonl, *.jsonl.gz) in {args.recordings}")
+        return 1
     out = args.out / args.strategy
     markets = _load_markets(source_factory, recs)
     results = run_batch(
@@ -382,7 +394,10 @@ def _cmd_calibrate(args: argparse.Namespace, source_factory: Callable[[], Any]) 
     from paperfill.batch import condition_of
     from paperfill.calibration import run_calibration, save, to_markdown
 
-    recs = [p for p in args.recordings.iterdir() if p.name.endswith((".jsonl", ".jsonl.gz"))]
+    recs = _recordings_in(args.recordings)
+    if not recs:
+        print(f"no recordings (*.jsonl, *.jsonl.gz) in {args.recordings}")
+        return 1
     offsets = [int(x) for x in args.offsets.split(",")]
     cal, samples = run_calibration(
         recs, lambda cid: _load_market(source_factory, cid), condition_of, offsets=offsets

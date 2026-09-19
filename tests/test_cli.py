@@ -158,3 +158,14 @@ def test_run_unknown_market_exits_1(capsys, tmp_path):
         main(["run", "--condition", "0xnope", "--runs-dir", str(tmp_path)], source_factory=Source)
         == 1
     )
+
+
+def test_batch_sweep_calibrate_refuse_an_empty_directory(capsys, tmp_path):
+    for argv in (
+        ["batch", "--recordings", str(tmp_path)],
+        ["sweep", "--recordings", str(tmp_path)],
+        ["calibrate", "--recordings", str(tmp_path)],
+        ["batch", "--recordings", str(tmp_path / "missing")],
+    ):
+        assert main(argv, source_factory=lambda: None) == 1
+        assert "no recordings" in capsys.readouterr().out
