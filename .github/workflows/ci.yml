@@ -30,7 +30,7 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
       - name: Tests with coverage
-        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=85 -m "not live"
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90 -m "not live"
 
   docker:
     runs-on: ubuntu-latest

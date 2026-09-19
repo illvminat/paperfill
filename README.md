@@ -146,8 +146,8 @@ uv run pytest -m live                 # talks to the public API
 make sources-check                    # warns about stale reference sources
 ```
 
-Sources of truth for every claim about Polymarket behaviour are listed in
-`SOURCES.md`. A claim without a source is marked as unverified. Decisions live in
+English design notes for clients: `docs/en/design.md`. Sources of truth for every
+claim about Polymarket behaviour are listed in `SOURCES.md`. A claim without a source is marked as unverified. Decisions live in
 `docs/decisions/`, requirements in `docs/zadanie.md`, measurements in
 `docs/measurements/`.
 
